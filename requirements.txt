@@ -4,3 +4,4 @@ openpyxl
 pinecone
 requests
 groq
+python-dotenv
