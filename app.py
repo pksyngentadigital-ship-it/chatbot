@@ -3,21 +3,20 @@ import pandas as pd
 import re
 from io import BytesIO
 from pinecone import Pinecone
-from groq import Groq  # ← REPLACED ollama
+from groq import Groq
 from dotenv import load_dotenv
 import os
 
 load_dotenv()
-
-GROQ_API_KEY = os.getenv("GROQ_API_KEY")
-PINECONE_API_KEY = os.getenv("PINECONE_API_KEY")
+GROQ_API_KEY = os.getenv("GROQ_API_KEY") or st.secrets.get("GROQ_API_KEY", None)
+PINECONE_API_KEY = os.getenv("PINECONE_API_KEY") or st.secrets.get("PINECONE_API_KEY", None)
 
 # ==========================================
 # CONFIGURATION & CONSTANTS
 # ==========================================
 PINECONE_INDEX_NAME = "chatbot"
 EMBEDDING_DIMENSION = 384
-GROQ_MODEL = "llama-3.1-8b-instant"  # ← Fast & free on Groq
+GROQ_MODEL = "llama-3.1-8b-instant"
 
 st.set_page_config(page_title="Weekly Sentiment RAG Engine", layout="wide")
 
@@ -31,7 +30,6 @@ if "chat_history" not in st.session_state:
 # ==========================================
 with st.sidebar:
     st.header("⚙️ System Credentials")
-
     st.markdown("---")
     st.subheader("🔑 Admin Panel")
     if not st.session_state.authenticated:
@@ -164,12 +162,21 @@ def get_latest_year_from_index(index) -> str:
     return "2026"
 
 
-def query_pinecone_for_timeframe(index, query_vector, month, year, week):
+# ==========================================
+# FIXED: query_intent parameter added
+# ==========================================
+def query_pinecone_for_timeframe(index, query_vector, month, year, week, query_intent="sentiment"):
     filter_conditions = {}
     if month:
         filter_conditions["month"] = {"$eq": month}
     if year:
         filter_conditions["year"]  = {"$eq": year}
+
+    # ── SENTIMENT FILTER AT DATABASE LEVEL ──
+    if query_intent == "positive":
+        filter_conditions["sentiment"] = {"$eq": "positive"}
+    elif query_intent == "complaint":
+        filter_conditions["sentiment"] = {"$eq": "negative"}
 
     metadata_filter = filter_conditions if filter_conditions else None
 
@@ -459,14 +466,14 @@ if user_query and user_query.strip():
             target_year       = latest_index_year
 
             pos, neg, neut = query_pinecone_for_timeframe(
-                index, query_vector, detected_month, target_year, detected_week
+                index, query_vector, detected_month, target_year, detected_week, query_intent
             )
 
             if (len(pos) + len(neg) + len(neut)) == 0:
                 try:
                     fallback_year = str(int(latest_index_year) - 1)
                     pos_fb, neg_fb, neut_fb = query_pinecone_for_timeframe(
-                        index, query_vector, detected_month, fallback_year, detected_week
+                        index, query_vector, detected_month, fallback_year, detected_week, query_intent
                     )
                     if (len(pos_fb) + len(neg_fb) + len(neut_fb)) > 0:
                         target_year        = fallback_year
@@ -475,7 +482,7 @@ if user_query and user_query.strip():
                     pass
 
         positive_bullets, negative_bullets, neutral_bullets = query_pinecone_for_timeframe(
-            index, query_vector, detected_month, target_year, detected_week
+            index, query_vector, detected_month, target_year, detected_week, query_intent
         )
 
         total_found = len(positive_bullets) + len(negative_bullets) + len(neutral_bullets)
@@ -597,13 +604,13 @@ if user_query and user_query.strip():
         f"User Query: {user_query}"
     )
 
-    # ── Stream response with Groq ──  ← ONLY THIS BLOCK CHANGED
+    # ── Stream response with Groq ──
     with st.chat_message("assistant"):
         stream_box    = st.empty()
         full_response = ""
 
         try:
-            groq_client = Groq(api_key=GROQ_API_KEY)  # ← Groq client
+            groq_client = Groq(api_key=GROQ_API_KEY)
 
             stream = groq_client.chat.completions.create(
                 model=GROQ_MODEL,
@@ -613,7 +620,7 @@ if user_query and user_query.strip():
                 ],
                 temperature=0.1,
                 max_tokens=400,
-                stream=True  # ← Streaming enabled
+                stream=True
             )
 
             for chunk in stream:
