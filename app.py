@@ -26,7 +26,7 @@ if "chat_history" not in st.session_state:
     st.session_state.chat_history = []
 
 # ==========================================
-# SIDEBAR
+# SIDEBAR: CREDENTIALS & CONFIG
 # ==========================================
 with st.sidebar:
     st.header("⚙️ System Credentials")
@@ -89,16 +89,6 @@ EMPTY_VALUES = {
     'nan', 'none', '', 'null', '-', 'n/a', 'na',
     'not filled', 'not available', 'no data', '0', 'tbd', 'pending'
 }
-
-# ==========================================
-# KNOWN PRODUCTS LIST
-# ==========================================
-KNOWN_PRODUCTS = [
-    "axial", "tilt", "isabion", "quantis", "allay", "allay max",
-    "metribuzin", "cropwise", "amistar", "bravo", "karate",
-    "actara", "cruiser", "dual", "folicur", "score", "topsin",
-    "vertimec", "match", "polo", "ridomil", "syngenta"
-]
 
 # ==========================================
 # UTILITIES
@@ -172,32 +162,14 @@ def get_latest_year_from_index(index) -> str:
     return "2026"
 
 
-# ==========================================
-# DETECT PRODUCT IN QUERY
-# ==========================================
-def detect_product_in_query(query: str) -> str | None:
-    query_lower = query.lower()
-    # sort by length descending to match longer names first (e.g. "allay max" before "allay")
-    for product in sorted(KNOWN_PRODUCTS, key=len, reverse=True):
-        if re.search(r'\b' + re.escape(product) + r'\b', query_lower):
-            return product
-    return None
-
-
-# ==========================================
-# PINECONE QUERY WITH INTENT + PRODUCT FILTER
-# ==========================================
-def query_pinecone_for_timeframe(
-    index, query_vector, month, year, week,
-    query_intent="sentiment", detected_product=None
-):
+def query_pinecone_for_timeframe(index, query_vector, month, year, week, query_intent="sentiment"):
     filter_conditions = {}
     if month:
         filter_conditions["month"] = {"$eq": month}
     if year:
         filter_conditions["year"]  = {"$eq": year}
 
-    # Sentiment filter at DB level
+    # ── SENTIMENT FILTER AT DATABASE LEVEL ──
     if query_intent == "positive":
         filter_conditions["sentiment"] = {"$eq": "positive"}
     elif query_intent == "complaint":
@@ -231,11 +203,6 @@ def query_pinecone_for_timeframe(
 
         if not value or value.lower() in EMPTY_VALUES:
             continue
-
-        # ── PRODUCT FILTER: skip entries that don't mention the product ──
-        if detected_product:
-            if detected_product.lower() not in value.lower():
-                continue
 
         if week:
             dw = week.lower()
@@ -415,8 +382,7 @@ if user_query and user_query.strip():
         "grower", "advisory", "quantis", "isabion", "week", "1st", "2nd", "3rd",
         "4th", "5th", "first", "second", "third", "fourth", "fifth",
         "issues", "concerns", "problems", "appreciation", "praise"
-    ] + KNOWN_PRODUCTS  # ← products auto-added to allowed keywords
-
+    ]
     query_words = re.findall(r'\b\w+\b', user_query.lower())
     is_relevant = any(word in allowed_keywords for word in query_words)
 
@@ -438,13 +404,10 @@ if user_query and user_query.strip():
 
     with st.spinner("Searching and aggregating matching historical data records..."):
 
-        detected_month   = None
-        detected_year    = None
-        detected_week    = None
-        query_lower      = user_query.lower()
-
-        # ── DETECT PRODUCT ──
-        detected_product = detect_product_in_query(user_query)
+        detected_month = None
+        detected_year  = None
+        detected_week  = None
+        query_lower    = user_query.lower()
 
         for shortcut in sorted(MONTH_MAP.keys(), key=len, reverse=True):
             if re.search(r'\b' + re.escape(shortcut) + r'\b', query_lower):
@@ -462,20 +425,44 @@ if user_query and user_query.strip():
         if week_match:
             detected_week = week_match.group(0)
 
+        # ==========================================
+        # INTENT DETECTION — FIXED
+        # ==========================================
+        # Order of priority:
+        # 1. "negative feedback" or complaint words  → complaint (negative only)
+        # 2. "positive feedback" or praise words     → positive (positive only)
+        # 3. "feedback" alone / sentiment words      → sentiment (both)
+
         complaint_keywords = [
-            "complaint", "complaints", "negative", "issues",
-            "problems", "concerns", "issue", "problem"
+            "complaint", "complaints", "negative feedback",
+            "negative", "issues", "problems", "concerns",
+            "issue", "problem"
         ]
         positive_keywords = [
-            "positive", "appreciation", "praise",
-            "favorable", "good feedback", "satisfied"
+            "positive feedback", "appreciation", "praise",
+            "favorable", "satisfied"
+        ]
+        sentiment_keywords = [
+            "sentiment", "sentiments", "overall", "general",
+            "overview", "analysis", "summary", "both",
+            "feedback", "feedbacks"
         ]
 
         query_intent = "sentiment"
-        if any(word in query_lower for word in complaint_keywords):
+
+        # Check complaint first — catches "negative feedback" before feedback alone
+        if any(phrase in query_lower for phrase in complaint_keywords):
             query_intent = "complaint"
-        elif any(word in query_lower for word in positive_keywords):
+
+        # Check explicit positive phrases
+        elif any(phrase in query_lower for phrase in positive_keywords):
             query_intent = "positive"
+
+        # "feedback" alone or sentiment words → both
+        elif any(word in query_lower for word in sentiment_keywords):
+            query_intent = "sentiment"
+
+        # ==========================================
 
         pc    = Pinecone(api_key=PINECONE_API_KEY)
         index = pc.Index(PINECONE_INDEX_NAME)
@@ -500,16 +487,14 @@ if user_query and user_query.strip():
             target_year       = latest_index_year
 
             pos, neg, neut = query_pinecone_for_timeframe(
-                index, query_vector, detected_month, target_year,
-                detected_week, query_intent, detected_product
+                index, query_vector, detected_month, target_year, detected_week, query_intent
             )
 
             if (len(pos) + len(neg) + len(neut)) == 0:
                 try:
                     fallback_year = str(int(latest_index_year) - 1)
                     pos_fb, neg_fb, neut_fb = query_pinecone_for_timeframe(
-                        index, query_vector, detected_month, fallback_year,
-                        detected_week, query_intent, detected_product
+                        index, query_vector, detected_month, fallback_year, detected_week, query_intent
                     )
                     if (len(pos_fb) + len(neg_fb) + len(neut_fb)) > 0:
                         target_year        = fallback_year
@@ -518,8 +503,7 @@ if user_query and user_query.strip():
                     pass
 
         positive_bullets, negative_bullets, neutral_bullets = query_pinecone_for_timeframe(
-            index, query_vector, detected_month, target_year,
-            detected_week, query_intent, detected_product
+            index, query_vector, detected_month, target_year, detected_week, query_intent
         )
 
         total_found = len(positive_bullets) + len(negative_bullets) + len(neutral_bullets)
@@ -534,39 +518,19 @@ if user_query and user_query.strip():
             f"ℹ️ Year not specified. Defaulting to the latest available dataset year: **{target_year}**"
         )
 
-    # ==========================================
-    # HEADER LOGIC — product-aware
-    # ==========================================
     timeframe_label = " ".join(
         filter(None, [detected_week, detected_month, target_year])
     ) or "the requested period"
 
-    product_label = detected_product.title() if detected_product else None
-
-    if detected_product:
-        # Product-specific heading
-        if query_intent == "complaint":
-            header = f"**Complaints of {product_label}:**\n\n"
-        elif query_intent == "positive":
-            header = f"**Positive Feedback of {product_label}:**\n\n"
-        else:
-            header = f"**Feedback of {product_label}:**\n\n"
+    if query_intent == "complaint":
+        header = f"**Complaints of {timeframe_label}:**\n\n"
+    elif query_intent == "positive":
+        header = f"**Positive Feedback of {timeframe_label}:**\n\n"
     else:
-        # Time-period heading (existing behavior unchanged)
-        if query_intent == "complaint":
-            header = f"**Complaints of {timeframe_label}:**\n\n"
-        elif query_intent == "positive":
-            header = f"**Positive Feedback of {timeframe_label}:**\n\n"
-        else:
-            header = f"**Sentiments of {timeframe_label}:**\n\n"
+        header = f"**Sentiments of {timeframe_label}:**\n\n"
 
     if total_found == 0:
-        if detected_product:
-            reply = (
-                f"{header}"
-                f"No data found for **{product_label}** in the ingested dataset."
-            )
-        elif detected_month or target_year or detected_week:
+        if detected_month or target_year or detected_week:
             reply = (
                 f"{header}"
                 f"No data found for **{timeframe_label}** in the ingested dataset."
@@ -607,61 +571,54 @@ if user_query and user_query.strip():
 
     combined_context = "\n\n".join(context_parts)
 
-    # ==========================================
-    # SYSTEM PROMPTS — product-aware
-    # ==========================================
-    product_scope = f"ONLY about {product_label}" if product_label else "about the products in the data"
-
     if query_intent == "complaint":
         system_prompt = (
-            f"You are an expert agricultural portfolio analyst for Syngenta. "
-            f"The user is asking specifically about complaints and negative feedback {product_scope}. "
-            f"Write a professional, natural response covering ONLY complaints and concerns {product_scope}. "
-            f"Do NOT mention any other products. Do NOT mention any positive feedback.\n\n"
-            f"Write one focused paragraph:\n"
-            f"State the exact reason for each complaint (e.g., price issues, unavailability, poor results, zero efficacy).\n\n"
-            f"Rules:\n"
-            f"- No bullet points. Prose only.\n"
-            f"- No bracketed dates or week labels.\n"
-            f"- Keep it concise (4-6 sentences max).\n"
-            f"- Strictly discuss only {product_label if product_label else 'the mentioned product'}."
+             "You are a smart chatbot analyst for Syngenta. "
+            "Respond naturally like a chatbot, not a formal report. "
+            f"Start your response with a line like: 'The complaints for {timeframe_label} are as follows:' "
+            "or 'Here are the complaints recorded for {timeframe_label}:' — then continue in prose. "
+            "Cover ONLY complaints and concerns. Do NOT mention any positive feedback. "
+            "Explicitly name every product and state the exact reason for each complaint. "
+            "Rules:\n"
+            "- No bullet points. Prose only.\n"
+            "- No bracketed dates or week labels.\n"
+            "- Keep it concise (4-6 sentences max).\n"
+            "- Sound like a helpful chatbot, not a corporate report."
         )
     elif query_intent == "positive":
         system_prompt = (
-            f"You are an expert agricultural portfolio analyst for Syngenta. "
-            f"The user is asking specifically about positive feedback {product_scope}. "
-            f"Write a professional, natural response covering ONLY positive sentiments {product_scope}. "
-            f"Do NOT mention any other products. Do NOT mention any complaints or negative feedback.\n\n"
-            f"Write one focused paragraph:\n"
-            f"State the exact reason why farmers or users are satisfied.\n\n"
-            f"Rules:\n"
-            f"- No bullet points. Prose only.\n"
-            f"- No bracketed dates or week labels.\n"
-            f"- Keep it concise (4-6 sentences max).\n"
-            f"- Strictly discuss only {product_label if product_label else 'the mentioned product'}."
+             "You are a smart chatbot analyst for Syngenta. "
+            "Respond naturally like a chatbot, not a formal report. "
+            f"Start your response with a line like: 'The positive feedback for {timeframe_label} looks great!' "
+            "or 'Here is the positive feedback recorded for {timeframe_label}:' — then continue in prose. "
+            "Cover ONLY positive sentiments and appreciation. Do NOT mention any complaints. "
+            "Explicitly name every product and state the exact reason users are satisfied. "
+            "Rules:\n"
+            "- No bullet points. Prose only.\n"
+            "- No bracketed dates or week labels.\n"
+            "- Keep it concise (4-6 sentences max).\n"
+            "- Sound like a helpful chatbot, not a corporate report."
         )
     else:
         system_prompt = (
-            f"You are an expert agricultural portfolio analyst for Syngenta. "
-            f"Analyze the provided feedback data and write a professional, natural chatbot response "
-            f"{'strictly focused on ' + product_label if product_label else 'for all products in the data'}. "
-            f"Do NOT include raw metadata tags, bracketed weeks, or IDs in your output. "
-            f"{'Do NOT mention any other products except ' + product_label + '.' if product_label else ''} "
-            f"Write in clean, flowing English sentences only.\n\n"
-            f"Structure your response in exactly two short paragraphs:\n\n"
-            f"Paragraph 1 — Favorable Sentiments: Summarize positive trends. "
-            f"State exactly why users are satisfied.\n\n"
-            f"Paragraph 2 — Complaints & Concerns: Summarize issues and queries. "
-            f"State the exact reason for each concern.\n\n"
-            f"Rules:\n"
-            f"- No bullet points. Prose only.\n"
-            f"- No bracketed dates or week labels.\n"
-            f"- Keep each paragraph concise (3-5 sentences max).\n"
-            f"- Every product in the context must appear in your response with its reason."
+            "You are a smart chatbot analyst for Syngenta. "
+            "Respond naturally like a chatbot, not a formal report. "
+            f"Start your response with a line like: 'Here is the sentiment overview for {timeframe_label}:' "
+            f"or 'The feedback analysis for {timeframe_label} is as follows:' — then continue. "
+            "Structure your response in exactly two short paragraphs:\n\n"
+            "Paragraph 1 — Favorable Sentiments: Summarize positive trends. "
+            "Explicitly name every product and state exactly why users are satisfied.\n\n"
+            "Paragraph 2 — Complaints & Concerns: Summarize issues. "
+            "Explicitly name every product and state the exact reason for each concern.\n\n"
+            "Rules:\n"
+            "- No bullet points. Prose only.\n"
+            "- No bracketed dates or week labels.\n"
+            "- Keep each paragraph concise (3-5 sentences max).\n"
+            "- Sound like a helpful chatbot, not a corporate report."
         )
 
     user_prompt = (
-        f"{'Product: ' + product_label if product_label else 'Timeframe: ' + timeframe_label}\n\n"
+        f"Timeframe: {timeframe_label}\n\n"
         f"Data Context:\n{combined_context}\n\n"
         f"User Query: {user_query}"
     )
