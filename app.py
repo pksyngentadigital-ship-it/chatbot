@@ -18,7 +18,7 @@ PINECONE_INDEX_NAME = "chatbot"
 EMBEDDING_DIMENSION = 384
 GROQ_MODEL = "llama-3.1-8b-instant"
 
-st.set_page_config(page_title="Weekly Sentiment RAG Engine", layout="wide")
+st.set_page_config(page_title="Syngenta Sentiment Engine", layout="wide", page_icon="🌱")
 
 if "authenticated" not in st.session_state:
     st.session_state.authenticated = False
@@ -26,25 +26,282 @@ if "chat_history" not in st.session_state:
     st.session_state.chat_history = []
 
 # ==========================================
-# SIDEBAR: CREDENTIALS & CONFIG
+# GLOBAL CSS
 # ==========================================
-with st.sidebar:
-    st.header("⚙️ System Credentials")
-    st.markdown("---")
-    st.subheader("🔑 Admin Panel")
-    if not st.session_state.authenticated:
-        admin_password = st.text_input("Enter Password", type="password")
-        if st.button("Login"):
-            if admin_password == "admin123":
-                st.session_state.authenticated = True
-                st.rerun()
-            else:
-                st.error("Invalid Credentials")
-    else:
-        st.write("🟢 Authorized Mode")
-        if st.button("Logout"):
-            st.session_state.authenticated = False
-            st.rerun()
+st.markdown("""
+<style>
+    /* ── Google Font ── */
+    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap');
+
+    * { font-family: 'Inter', sans-serif; }
+
+    /* ── App background ── */
+    .stApp {
+        background: linear-gradient(135deg, #0d1b2a 0%, #1a3c5e 50%, #0d2b1f 100%);
+        min-height: 100vh;
+    }
+
+    /* ── Hide default streamlit chrome ── */
+    #MainMenu, footer, header { visibility: hidden; }
+    .block-container {
+        padding-top: 1rem !important;
+        padding-bottom: 1rem !important;
+        max-width: 900px !important;
+    }
+
+    /* ── Sidebar ── */
+    [data-testid="stSidebar"] {
+        background: linear-gradient(180deg, #0a1628 0%, #1a3c5e 100%) !important;
+        border-right: 1px solid rgba(0,166,81,0.3);
+    }
+    [data-testid="stSidebar"] * { color: #e8f4f8 !important; }
+    [data-testid="stSidebar"] .stTextInput input {
+        background: rgba(255,255,255,0.08) !important;
+        border: 1px solid rgba(0,166,81,0.4) !important;
+        border-radius: 10px !important;
+        color: white !important;
+        padding: 10px 14px !important;
+    }
+    [data-testid="stSidebar"] .stButton button {
+        background: linear-gradient(135deg, #00a651, #007a3d) !important;
+        color: white !important;
+        border: none !important;
+        border-radius: 10px !important;
+        width: 100% !important;
+        font-weight: 600 !important;
+        padding: 10px !important;
+        transition: all 0.3s ease !important;
+    }
+    [data-testid="stSidebar"] .stButton button:hover {
+        transform: translateY(-1px) !important;
+        box-shadow: 0 4px 15px rgba(0,166,81,0.4) !important;
+    }
+
+    /* ── Chat container wrapper ── */
+    .chat-wrapper {
+        background: rgba(255,255,255,0.04);
+        backdrop-filter: blur(10px);
+        border: 1px solid rgba(255,255,255,0.08);
+        border-radius: 20px;
+        padding: 20px 16px 10px 16px;
+        margin-bottom: 8px;
+        min-height: 420px;
+        max-height: 560px;
+        overflow-y: auto;
+    }
+
+    /* ── User chat bubble ── */
+    .bubble-user {
+        display: flex;
+        justify-content: flex-end;
+        align-items: flex-end;
+        gap: 8px;
+        margin: 6px 0;
+    }
+    .bubble-user .msg {
+        background: linear-gradient(135deg, #00a651, #007a3d);
+        color: white;
+        padding: 11px 16px;
+        border-radius: 18px 18px 4px 18px;
+        max-width: 72%;
+        font-size: 14px;
+        line-height: 1.5;
+        box-shadow: 0 3px 12px rgba(0,166,81,0.35);
+        word-wrap: break-word;
+    }
+    .bubble-user .avatar {
+        width: 32px; height: 32px;
+        background: rgba(0,166,81,0.2);
+        border-radius: 50%;
+        display: flex; align-items: center; justify-content: center;
+        font-size: 16px; flex-shrink: 0;
+        border: 1px solid rgba(0,166,81,0.4);
+    }
+
+    /* ── Bot chat bubble ── */
+    .bubble-bot {
+        display: flex;
+        justify-content: flex-start;
+        align-items: flex-start;
+        gap: 8px;
+        margin: 6px 0;
+    }
+    .bubble-bot .avatar {
+        width: 32px; height: 32px;
+        background: linear-gradient(135deg, #1a3c5e, #0d2b3e);
+        border-radius: 50%;
+        display: flex; align-items: center; justify-content: center;
+        font-size: 16px; flex-shrink: 0;
+        border: 1px solid rgba(0,166,81,0.3);
+        margin-top: 2px;
+    }
+    .bubble-bot .msg {
+        background: rgba(255,255,255,0.07);
+        backdrop-filter: blur(8px);
+        color: #e8f4f8;
+        padding: 11px 16px;
+        border-radius: 18px 18px 18px 4px;
+        max-width: 78%;
+        font-size: 14px;
+        line-height: 1.6;
+        box-shadow: 0 3px 12px rgba(0,0,0,0.2);
+        border: 1px solid rgba(255,255,255,0.1);
+        word-wrap: break-word;
+    }
+
+    /* ── Chat input ── */
+    [data-testid="stChatInput"] {
+        background: rgba(255,255,255,0.06) !important;
+        border: 1.5px solid rgba(0,166,81,0.5) !important;
+        border-radius: 16px !important;
+        backdrop-filter: blur(10px) !important;
+    }
+    [data-testid="stChatInput"] textarea {
+        color: white !important;
+        font-size: 14px !important;
+    }
+    [data-testid="stChatInput"] button {
+        background: #00a651 !important;
+        border-radius: 10px !important;
+    }
+
+    /* ── Page title ── */
+    .page-title {
+        text-align: center;
+        padding: 6px 0 14px 0;
+    }
+    .page-title h1 {
+        font-size: 1.7rem;
+        font-weight: 700;
+        color: white;
+        margin: 0;
+        letter-spacing: -0.3px;
+    }
+    .page-title p {
+        color: rgba(255,255,255,0.5);
+        font-size: 13px;
+        margin: 4px 0 0 0;
+    }
+
+    /* ── Admin panel card ── */
+    .admin-card {
+        background: rgba(255,255,255,0.05);
+        backdrop-filter: blur(12px);
+        border: 1px solid rgba(0,166,81,0.25);
+        border-radius: 20px;
+        padding: 28px 32px;
+        margin-bottom: 20px;
+    }
+    .admin-card h2 {
+        color: white;
+        font-size: 1.4rem;
+        font-weight: 700;
+        margin: 0 0 4px 0;
+    }
+    .admin-card p {
+        color: rgba(255,255,255,0.45);
+        font-size: 13px;
+        margin: 0 0 22px 0;
+    }
+
+    /* ── Upload zone ── */
+    [data-testid="stFileUploader"] {
+        background: rgba(0,166,81,0.05) !important;
+        border: 2px dashed rgba(0,166,81,0.4) !important;
+        border-radius: 16px !important;
+        padding: 20px !important;
+        transition: all 0.3s ease !important;
+    }
+    [data-testid="stFileUploader"]:hover {
+        border-color: rgba(0,166,81,0.8) !important;
+        background: rgba(0,166,81,0.08) !important;
+    }
+    [data-testid="stFileUploader"] label {
+        color: rgba(255,255,255,0.7) !important;
+        font-size: 14px !important;
+    }
+    [data-testid="stFileUploader"] svg { color: #00a651 !important; }
+
+    /* ── Process button ── */
+    .stButton > button {
+        background: linear-gradient(135deg, #00a651, #007a3d) !important;
+        color: white !important;
+        border: none !important;
+        border-radius: 12px !important;
+        padding: 12px 28px !important;
+        font-weight: 600 !important;
+        font-size: 14px !important;
+        letter-spacing: 0.3px !important;
+        transition: all 0.3s ease !important;
+        box-shadow: 0 4px 15px rgba(0,166,81,0.3) !important;
+    }
+    .stButton > button:hover {
+        transform: translateY(-2px) !important;
+        box-shadow: 0 6px 20px rgba(0,166,81,0.45) !important;
+    }
+
+    /* ── Progress bar ── */
+    .stProgress > div > div {
+        background: linear-gradient(90deg, #00a651, #00d468) !important;
+        border-radius: 10px !important;
+    }
+    .stProgress > div {
+        background: rgba(255,255,255,0.1) !important;
+        border-radius: 10px !important;
+    }
+
+    /* ── Info / success / warning / error boxes ── */
+    .stAlert {
+        border-radius: 12px !important;
+        border: none !important;
+        font-size: 13px !important;
+    }
+
+    /* ── Spinner ── */
+    .stSpinner > div { border-top-color: #00a651 !important; }
+
+    /* ── Stats row ── */
+    .stat-card {
+        background: rgba(255,255,255,0.06);
+        border: 1px solid rgba(0,166,81,0.2);
+        border-radius: 14px;
+        padding: 16px 20px;
+        text-align: center;
+    }
+    .stat-card .stat-num {
+        font-size: 2rem;
+        font-weight: 700;
+        color: #00a651;
+        line-height: 1;
+    }
+    .stat-card .stat-label {
+        font-size: 12px;
+        color: rgba(255,255,255,0.5);
+        margin-top: 4px;
+    }
+
+    /* ── Divider ── */
+    hr { border-color: rgba(255,255,255,0.08) !important; }
+
+    /* ── Scrollbar ── */
+    ::-webkit-scrollbar { width: 5px; }
+    ::-webkit-scrollbar-track { background: transparent; }
+    ::-webkit-scrollbar-thumb {
+        background: rgba(0,166,81,0.4);
+        border-radius: 10px;
+    }
+
+    /* ── Hide streamlit chat avatars (we use custom) ── */
+    [data-testid="chatAvatarIcon-user"],
+    [data-testid="chatAvatarIcon-assistant"] { display: none !important; }
+
+    [data-testid="stChatMessage"] {
+        background: transparent !important;
+        border: none !important;
+        padding: 0 !important;
+    }
+</style>
+""", unsafe_allow_html=True)
 
 # ==========================================
 # CONSTANTS & DICTIONARIES
@@ -101,13 +358,11 @@ def find_category_column(df_columns):
             return col
     return None
 
-
 def infer_year_for_sheet(sheet_name: str, all_sheet_names: list) -> str | None:
     direct = re.search(r'(20\d{2})', sheet_name.strip())
     if direct:
         return direct.group(0)
     return None
-
 
 def normalize_category(raw_val):
     if not raw_val:
@@ -117,10 +372,8 @@ def normalize_category(raw_val):
         return CATEGORY_NORMALIZE[cleaned]
     return str(raw_val).strip()
 
-
 def is_empty_cell(value: str) -> bool:
     return value.strip().lower() in EMPTY_VALUES or value.strip() == ""
-
 
 def split_bullets(cell_text: str) -> list[str]:
     lines = cell_text.split('\n')
@@ -130,7 +383,6 @@ def split_bullets(cell_text: str) -> list[str]:
         if clean and clean.lower() not in EMPTY_VALUES and len(clean) > 3:
             bullets.append(clean)
     return bullets
-
 
 def extract_month_from_col(col: str) -> str:
     match = re.search(
@@ -144,7 +396,6 @@ def extract_month_from_col(col: str) -> str:
     raw  = match.group(0).capitalize()
     full = MONTH_MAP.get(raw.lower(), raw)
     return MONTH_TYPO_FIX.get(full, full)
-
 
 def get_latest_year_from_index(index) -> str:
     try:
@@ -161,22 +412,18 @@ def get_latest_year_from_index(index) -> str:
         pass
     return "2026"
 
-
 def query_pinecone_for_timeframe(index, query_vector, month, year, week, query_intent="sentiment"):
     filter_conditions = {}
     if month:
         filter_conditions["month"] = {"$eq": month}
     if year:
         filter_conditions["year"]  = {"$eq": year}
-
-    # ── SENTIMENT FILTER AT DATABASE LEVEL ──
     if query_intent == "positive":
         filter_conditions["sentiment"] = {"$eq": "positive"}
     elif query_intent == "complaint":
         filter_conditions["sentiment"] = {"$eq": "negative"}
 
     metadata_filter = filter_conditions if filter_conditions else None
-
     results = index.query(
         vector=query_vector,
         top_k=100,
@@ -222,21 +469,154 @@ def query_pinecone_for_timeframe(index, query_vector, month, year, week, query_i
 
     return positive_bullets, negative_bullets, neutral_bullets
 
+# ==========================================
+# SIDEBAR
+# ==========================================
+with st.sidebar:
+    st.markdown("""
+        <div style="padding: 20px 0 10px 0; text-align: center;">
+            <div style="font-size: 2.2rem; margin-bottom: 6px;">🌱</div>
+            <div style="font-size: 1.1rem; font-weight: 700; color: white; letter-spacing: 0.5px;">
+                Syngenta
+            </div>
+            <div style="font-size: 11px; color: rgba(255,255,255,0.4); margin-top: 2px;">
+                Sentiment Intelligence Engine
+            </div>
+        </div>
+        <hr style="border-color: rgba(0,166,81,0.25); margin: 10px 0 18px 0;">
+    """, unsafe_allow_html=True)
+
+    if not st.session_state.authenticated:
+        st.markdown("""
+            <div style="font-size: 13px; font-weight: 600;
+                        color: rgba(255,255,255,0.6);
+                        letter-spacing: 0.5px; margin-bottom: 10px;">
+                🔑 ADMIN LOGIN
+            </div>
+        """, unsafe_allow_html=True)
+        admin_password = st.text_input("Password", type="password", label_visibility="collapsed",
+                                        placeholder="Enter admin password...")
+        if st.button("Login →"):
+            if admin_password == "admin123":
+                st.session_state.authenticated = True
+                st.rerun()
+            else:
+                st.error("Invalid credentials")
+    else:
+        st.markdown("""
+            <div style="
+                background: rgba(0,166,81,0.15);
+                border: 1px solid rgba(0,166,81,0.35);
+                border-radius: 12px;
+                padding: 12px 14px;
+                margin-bottom: 14px;
+            ">
+                <div style="display:flex; align-items:center; gap:8px;">
+                    <div style="width:8px; height:8px; background:#00a651;
+                                border-radius:50%; box-shadow: 0 0 6px #00a651;"></div>
+                    <span style="color:white; font-size:13px; font-weight:600;">
+                        Authorized Mode
+                    </span>
+                </div>
+                <div style="color:rgba(255,255,255,0.45); font-size:11px; margin-top:4px; margin-left:16px;">
+                    Admin access granted
+                </div>
+            </div>
+        """, unsafe_allow_html=True)
+        if st.button("Logout"):
+            st.session_state.authenticated = False
+            st.rerun()
+
+        st.markdown("""
+            <hr style="border-color: rgba(255,255,255,0.08); margin: 16px 0;">
+            <div style="font-size: 11px; color: rgba(255,255,255,0.3);
+                        text-align: center; padding-bottom: 8px;">
+                Dataset Pipeline v2.0
+            </div>
+        """, unsafe_allow_html=True)
 
 # ==========================================
-# ADMIN: EXCEL INGESTION
+# ADMIN PANEL — INGESTION
 # ==========================================
 if st.session_state.authenticated:
-    st.title("📥 Dataset Pipeline Ingestion Panel")
-    uploaded_file = st.file_uploader("Upload Master Performance Log (.xlsx)", type=["xlsx"])
+
+    st.markdown("""
+        <div class="admin-card">
+            <h2>📥 Dataset Pipeline Ingestion</h2>
+            <p>Upload your master performance log to embed and index into the vector database</p>
+        </div>
+    """, unsafe_allow_html=True)
+
+    col_upload, col_info = st.columns([2, 1])
+
+    with col_upload:
+        st.markdown("""
+            <div style="font-size: 13px; font-weight: 600;
+                        color: rgba(255,255,255,0.6);
+                        letter-spacing: 0.5px; margin-bottom: 8px;">
+                📂 UPLOAD EXCEL FILE
+            </div>
+        """, unsafe_allow_html=True)
+        uploaded_file = st.file_uploader(
+            "Drop your .xlsx file here",
+            type=["xlsx"],
+            label_visibility="collapsed"
+        )
+
+    with col_info:
+        st.markdown("""
+            <div style="
+                background: rgba(0,166,81,0.07);
+                border: 1px solid rgba(0,166,81,0.2);
+                border-radius: 14px;
+                padding: 16px;
+                height: 100%;
+            ">
+                <div style="color: rgba(255,255,255,0.7); font-size: 12px;
+                            font-weight: 600; margin-bottom: 10px; letter-spacing: 0.5px;">
+                    📋 REQUIREMENTS
+                </div>
+                <div style="color: rgba(255,255,255,0.45); font-size: 12px; line-height: 1.8;">
+                    ✅ Format: <b style="color:rgba(255,255,255,0.65)">.xlsx</b><br>
+                    ✅ Sheet names must include year<br>
+                    ✅ Category column required<br>
+                    ✅ Week columns with month names
+                </div>
+            </div>
+        """, unsafe_allow_html=True)
 
     if uploaded_file and PINECONE_API_KEY:
-        if st.button("Process Sheets & Map Matrix"):
+        st.markdown("<div style='margin-top: 16px;'></div>", unsafe_allow_html=True)
+
+        col_btn, _ = st.columns([1, 3])
+        with col_btn:
+            process_clicked = st.button("⚡ Process & Ingest Sheets")
+
+        if process_clicked:
             progress_bar = st.progress(0)
-            status_text  = st.empty()
+
+            st.markdown("""
+                <div style="
+                    background: rgba(0,166,81,0.06);
+                    border: 1px solid rgba(0,166,81,0.2);
+                    border-radius: 14px;
+                    padding: 20px 24px;
+                    margin-top: 16px;
+                ">
+                    <div style="color: rgba(255,255,255,0.8); font-size: 13px;
+                                font-weight: 600; margin-bottom: 12px;">
+                        🔄 Processing Pipeline
+                    </div>
+            """, unsafe_allow_html=True)
+
+            status_text = st.empty()
 
             with st.spinner("Executing server-side matrix mapping..."):
                 try:
+                    status_text.markdown(
+                        "<p style='color:rgba(255,255,255,0.5); font-size:13px;'>📖 Reading Excel sheets...</p>",
+                        unsafe_allow_html=True
+                    )
                     file_bytes  = BytesIO(uploaded_file.read())
                     excel_file  = pd.ExcelFile(file_bytes)
                     all_sheets  = excel_file.sheet_names
@@ -247,6 +627,12 @@ if st.session_state.authenticated:
                     payload_batch             = []
                     text_inputs_for_embedding = []
                     discovered_data_summary   = {}
+
+                    progress_bar.progress(10)
+                    status_text.markdown(
+                        "<p style='color:rgba(255,255,255,0.5); font-size:13px;'>🗂️ Parsing sheet structure...</p>",
+                        unsafe_allow_html=True
+                    )
 
                     for sheet_name in all_sheets:
                         sheet_clean   = sheet_name.strip()
@@ -275,7 +661,6 @@ if st.session_state.authenticated:
 
                             for col in week_cols:
                                 cell_raw = str(row[col]).strip()
-
                                 if is_empty_cell(cell_raw):
                                     continue
 
@@ -297,7 +682,6 @@ if st.session_state.authenticated:
                                         f"Case Category: {category}. "
                                         f"Feedback: {bullet}."
                                     )
-
                                     metadata_payload = {
                                         "text":      context_chunk,
                                         "month":     row_month,
@@ -311,7 +695,6 @@ if st.session_state.authenticated:
                                         ),
                                         "value": bullet
                                     }
-
                                     clean_cat   = re.sub(r'[^a-zA-Z0-9]', '', category.replace(' ', '_'))
                                     clean_col   = re.sub(r'[^a-zA-Z0-9]', '', col.replace(' ', '_'))
                                     clean_sheet = re.sub(r'[^a-zA-Z0-9]', '', sheet_clean.replace(' ', '_'))
@@ -322,8 +705,14 @@ if st.session_state.authenticated:
 
                     total_records = len(payload_batch)
                     if total_records == 0:
-                        st.warning("No records found.")
+                        st.warning("⚠️ No records found. Check sheet names include a year (e.g. 2025).")
                         st.stop()
+
+                    progress_bar.progress(40)
+                    status_text.markdown(
+                        f"<p style='color:rgba(255,255,255,0.5); font-size:13px;'>🧠 Generating embeddings for <b style='color:#00a651'>{total_records}</b> records...</p>",
+                        unsafe_allow_html=True
+                    )
 
                     BATCH_LIMIT = 96
                     all_vectors = []
@@ -336,6 +725,14 @@ if st.session_state.authenticated:
                             parameters={"input_type": "passage", "dimension": EMBEDDING_DIMENSION}
                         )
                         all_vectors.extend([item.values for item in embeddings_response])
+                        pct = 40 + int((i / total_records) * 35)
+                        progress_bar.progress(min(pct, 75))
+
+                    progress_bar.progress(80)
+                    status_text.markdown(
+                        "<p style='color:rgba(255,255,255,0.5); font-size:13px;'>📤 Upserting vectors to Pinecone...</p>",
+                        unsafe_allow_html=True
+                    )
 
                     upsert_buffer = []
                     for i, item in enumerate(payload_batch):
@@ -351,25 +748,97 @@ if st.session_state.authenticated:
                     if upsert_buffer:
                         index.upsert(vectors=upsert_buffer)
 
-                    st.success(f"🎉 Pipeline complete! Ingested {total_records} records.")
+                    progress_bar.progress(100)
+                    status_text.empty()
+
+                    # ── Success summary ──
+                    st.markdown("</div>", unsafe_allow_html=True)
+                    st.markdown("""
+                        <div style="
+                            background: rgba(0,166,81,0.12);
+                            border: 1px solid rgba(0,166,81,0.4);
+                            border-radius: 14px;
+                            padding: 18px 22px;
+                            margin-top: 14px;
+                            display: flex;
+                            align-items: center;
+                            gap: 14px;
+                        ">
+                            <div style="font-size: 2rem;">🎉</div>
+                            <div>
+                                <div style="color: #00d468; font-weight: 700; font-size: 15px;">
+                                    Pipeline Complete!
+                                </div>
+                                <div style="color: rgba(255,255,255,0.55); font-size: 13px; margin-top: 2px;">
+                                    Successfully ingested <b style="color:white">""" + str(total_records) + """</b> records into the vector database.
+                                </div>
+                            </div>
+                        </div>
+                    """, unsafe_allow_html=True)
+
+                    # ── Stats row ──
+                    if discovered_data_summary:
+                        st.markdown("<div style='margin-top: 16px;'>", unsafe_allow_html=True)
+                        top_months = sorted(
+                            discovered_data_summary.items(),
+                            key=lambda x: x[1], reverse=True
+                        )[:4]
+                        cols = st.columns(len(top_months))
+                        for i, (period, count) in enumerate(top_months):
+                            with cols[i]:
+                                st.markdown(f"""
+                                    <div class="stat-card">
+                                        <div class="stat-num">{count}</div>
+                                        <div class="stat-label">{period}</div>
+                                    </div>
+                                """, unsafe_allow_html=True)
+                        st.markdown("</div>", unsafe_allow_html=True)
 
                 except Exception as e:
-                    st.error(f"Inbound data ingestion pipe error: {e}")
+                    st.error(f"Pipeline error: {e}")
+
+    st.markdown("<hr style='border-color: rgba(255,255,255,0.08); margin: 24px 0 20px 0;'>",
+                unsafe_allow_html=True)
 
 # ==========================================
 # PUBLIC CHAT INTERFACE
 # ==========================================
-st.title("📊 Strategic Enterprise Performance Analyzer")
+st.markdown("""
+    <div class="page-title">
+        <h1>📊 Syngenta Sentiment Analyzer</h1>
+        <p>Query weekly feedback, complaints, and sentiment trends from the ingested dataset</p>
+    </div>
+""", unsafe_allow_html=True)
 
+# ── Render chat history with custom bubbles ──
 for message in st.session_state.chat_history:
-    with st.chat_message(message["role"]):
-        st.markdown(message["content"])
+    if message["role"] == "user":
+        st.markdown(f"""
+            <div class="bubble-user">
+                <div class="msg">{message["content"]}</div>
+                <div class="avatar">👤</div>
+            </div>
+        """, unsafe_allow_html=True)
+    else:
+        st.markdown(f"""
+            <div class="bubble-bot">
+                <div class="avatar">🌱</div>
+                <div class="msg">{message["content"]}</div>
+            </div>
+        """, unsafe_allow_html=True)
 
-user_query = st.chat_input("Query specific week, month, or portfolio sentiment tracking metrics...")
+# ── Chat input ──
+user_query = st.chat_input("Ask about weekly sentiment, complaints, or product feedback...")
 
 if user_query and user_query.strip():
-    with st.chat_message("user"):
-        st.markdown(user_query)
+
+    # Show user bubble immediately
+    st.markdown(f"""
+        <div class="bubble-user">
+            <div class="msg">{user_query}</div>
+            <div class="avatar">👤</div>
+        </div>
+    """, unsafe_allow_html=True)
     st.session_state.chat_history.append({"role": "user", "content": user_query})
 
     # ── STRICT TOPIC GUARDRAIL ──
@@ -392,17 +861,26 @@ if user_query and user_query.strip():
             "I am strictly locked to analyzed dataset metrics "
             "and cannot find relevant information for this query."
         )
-        with st.chat_message("assistant"):
-            st.markdown(reply)
+        st.markdown(f"""
+            <div class="bubble-bot">
+                <div class="avatar">🌱</div>
+                <div class="msg">{reply}</div>
+            </div>
+        """, unsafe_allow_html=True)
         st.session_state.chat_history.append({"role": "assistant", "content": reply})
         st.stop()
 
     if not PINECONE_API_KEY:
-        with st.chat_message("assistant"):
-            st.markdown("🤖 Execution Halted: Pinecone API key is not configured.")
+        reply = "🤖 Execution Halted: Pinecone API key is not configured."
+        st.markdown(f"""
+            <div class="bubble-bot">
+                <div class="avatar">🌱</div>
+                <div class="msg">{reply}</div>
+            </div>
+        """, unsafe_allow_html=True)
         st.stop()
 
-    with st.spinner("Searching and aggregating matching historical data records..."):
+    with st.spinner("Searching dataset..."):
 
         detected_month = None
         detected_year  = None
@@ -425,14 +903,6 @@ if user_query and user_query.strip():
         if week_match:
             detected_week = week_match.group(0)
 
-        # ==========================================
-        # INTENT DETECTION — FIXED
-        # ==========================================
-        # Order of priority:
-        # 1. "negative feedback" or complaint words  → complaint (negative only)
-        # 2. "positive feedback" or praise words     → positive (positive only)
-        # 3. "feedback" alone / sentiment words      → sentiment (both)
-
         complaint_keywords = [
             "complaint", "complaints", "negative feedback",
             "negative", "issues", "problems", "concerns",
@@ -449,20 +919,12 @@ if user_query and user_query.strip():
         ]
 
         query_intent = "sentiment"
-
-        # Check complaint first — catches "negative feedback" before feedback alone
         if any(phrase in query_lower for phrase in complaint_keywords):
             query_intent = "complaint"
-
-        # Check explicit positive phrases
         elif any(phrase in query_lower for phrase in positive_keywords):
             query_intent = "positive"
-
-        # "feedback" alone or sentiment words → both
         elif any(word in query_lower for word in sentiment_keywords):
             query_intent = "sentiment"
-
-        # ==========================================
 
         pc    = Pinecone(api_key=PINECONE_API_KEY)
         index = pc.Index(PINECONE_INDEX_NAME)
@@ -505,17 +967,16 @@ if user_query and user_query.strip():
         positive_bullets, negative_bullets, neutral_bullets = query_pinecone_for_timeframe(
             index, query_vector, detected_month, target_year, detected_week, query_intent
         )
-
         total_found = len(positive_bullets) + len(negative_bullets) + len(neutral_bullets)
 
     if fallback_triggered:
         st.info(
-            f"ℹ️ No data found for {detected_month} {latest_index_year}. "
-            f"Automatically falling back to **{target_year}**."
+            f"ℹ️ No data for {detected_month} {latest_index_year}. "
+            f"Falling back to **{target_year}**."
         )
     elif detected_month and not detected_year:
         st.info(
-            f"ℹ️ Year not specified. Defaulting to the latest available dataset year: **{target_year}**"
+            f"ℹ️ Year not specified. Using latest available: **{target_year}**"
         )
 
     timeframe_label = " ".join(
@@ -531,23 +992,23 @@ if user_query and user_query.strip():
 
     if total_found == 0:
         if detected_month or target_year or detected_week:
-            reply = (
-                f"{header}"
-                f"No data found for **{timeframe_label}** in the ingested dataset."
-            )
+            reply = f"No data found for **{timeframe_label}** in the ingested dataset."
         else:
             reply = (
                 "I cannot generate this response. "
                 "I am strictly locked to analyzed dataset metrics "
                 "and cannot find relevant information for this query."
             )
-        with st.chat_message("assistant"):
-            st.markdown(reply)
-        st.session_state.chat_history.append({"role": "assistant", "content": reply})
+        st.markdown(f"""
+            <div class="bubble-bot">
+                <div class="avatar">🌱</div>
+                <div class="msg">{header}{reply}</div>
+            </div>
+        """, unsafe_allow_html=True)
+        st.session_state.chat_history.append({"role": "assistant", "content": header + reply})
         st.stop()
 
     MAX_BULLETS = 12
-
     if query_intent == "complaint":
         positive_bullets = []
         negative_bullets = negative_bullets[:MAX_BULLETS]
@@ -573,46 +1034,35 @@ if user_query and user_query.strip():
 
     if query_intent == "complaint":
         system_prompt = (
-             "You are a smart chatbot analyst for Syngenta. "
+            "You are a smart chatbot analyst for Syngenta. "
             "Respond naturally like a chatbot, not a formal report. "
             f"Start your response with a line like: 'The complaints for {timeframe_label} are as follows:' "
-            "or 'Here are the complaints recorded for {timeframe_label}:' — then continue in prose. "
             "Cover ONLY complaints and concerns. Do NOT mention any positive feedback. "
             "Explicitly name every product and state the exact reason for each complaint. "
-            "Rules:\n"
-            "- No bullet points. Prose only.\n"
-            "- No bracketed dates or week labels.\n"
-            "- Keep it concise (4-6 sentences max).\n"
-            "- Sound like a helpful chatbot, not a corporate report."
+            "Rules:\n- No bullet points. Prose only.\n- No bracketed dates or week labels.\n"
+            "- Keep it concise (4-6 sentences max).\n- Sound like a helpful chatbot, not a corporate report."
         )
     elif query_intent == "positive":
         system_prompt = (
-             "You are a smart chatbot analyst for Syngenta. "
+            "You are a smart chatbot analyst for Syngenta. "
             "Respond naturally like a chatbot, not a formal report. "
             f"Start your response with a line like: 'The positive feedback for {timeframe_label} looks great!' "
-            "or 'Here is the positive feedback recorded for {timeframe_label}:' — then continue in prose. "
             "Cover ONLY positive sentiments and appreciation. Do NOT mention any complaints. "
             "Explicitly name every product and state the exact reason users are satisfied. "
-            "Rules:\n"
-            "- No bullet points. Prose only.\n"
-            "- No bracketed dates or week labels.\n"
-            "- Keep it concise (4-6 sentences max).\n"
-            "- Sound like a helpful chatbot, not a corporate report."
+            "Rules:\n- No bullet points. Prose only.\n- No bracketed dates or week labels.\n"
+            "- Keep it concise (4-6 sentences max).\n- Sound like a helpful chatbot, not a corporate report."
         )
     else:
         system_prompt = (
             "You are a smart chatbot analyst for Syngenta. "
             "Respond naturally like a chatbot, not a formal report. "
             f"Start your response with a line like: 'Here is the sentiment overview for {timeframe_label}:' "
-            f"or 'The feedback analysis for {timeframe_label} is as follows:' — then continue. "
             "Structure your response in exactly two short paragraphs:\n\n"
             "Paragraph 1 — Favorable Sentiments: Summarize positive trends. "
             "Explicitly name every product and state exactly why users are satisfied.\n\n"
             "Paragraph 2 — Complaints & Concerns: Summarize issues. "
             "Explicitly name every product and state the exact reason for each concern.\n\n"
-            "Rules:\n"
-            "- No bullet points. Prose only.\n"
-            "- No bracketed dates or week labels.\n"
+            "Rules:\n- No bullet points. Prose only.\n- No bracketed dates or week labels.\n"
             "- Keep each paragraph concise (3-5 sentences max).\n"
             "- Sound like a helpful chatbot, not a corporate report."
         )
@@ -623,35 +1073,50 @@ if user_query and user_query.strip():
         f"User Query: {user_query}"
     )
 
-    # ── Stream response with Groq ──
-    with st.chat_message("assistant"):
-        stream_box    = st.empty()
-        full_response = ""
+    # ── Stream response into bot bubble ──
+    bot_placeholder = st.empty()
+    full_response   = ""
 
-        try:
-            groq_client = Groq(api_key=GROQ_API_KEY)
+    try:
+        groq_client = Groq(api_key=GROQ_API_KEY)
+        stream = groq_client.chat.completions.create(
+            model=GROQ_MODEL,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user",   "content": user_prompt}
+            ],
+            temperature=0.1,
+            max_tokens=400,
+            stream=True
+        )
 
-            stream = groq_client.chat.completions.create(
-                model=GROQ_MODEL,
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user",   "content": user_prompt}
-                ],
-                temperature=0.1,
-                max_tokens=400,
-                stream=True
-            )
+        for chunk in stream:
+            token = chunk.choices[0].delta.content or ""
+            full_response += token
+            bot_placeholder.markdown(f"""
+                <div class="bubble-bot">
+                    <div class="avatar">🌱</div>
+                    <div class="msg">{header}{full_response}▌</div>
+                </div>
+            """, unsafe_allow_html=True)
 
-            for chunk in stream:
-                token = chunk.choices[0].delta.content or ""
-                full_response += token
-                stream_box.markdown(header + full_response + "▌")
+        bot_placeholder.markdown(f"""
+            <div class="bubble-bot">
+                <div class="avatar">🌱</div>
+                <div class="msg">{header}{full_response}</div>
+            </div>
+        """, unsafe_allow_html=True)
 
-            stream_box.markdown(header + full_response)
+    except Exception as e:
+        full_response = f"Operational Processing Error: {e}"
+        bot_placeholder.markdown(f"""
+            <div class="bubble-bot">
+                <div class="avatar">🌱</div>
+                <div class="msg">{full_response}</div>
+            </div>
+        """, unsafe_allow_html=True)
 
-        except Exception as e:
-            full_response = f"Operational Processing Error: {e}"
-            stream_box.markdown(header + full_response)
-
-    final_reply = header + full_response
-    st.session_state.chat_history.append({"role": "assistant", "content": final_reply})
+    st.session_state.chat_history.append({
+        "role": "assistant",
+        "content": header + full_response
+    })
