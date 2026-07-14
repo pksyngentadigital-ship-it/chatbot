@@ -162,9 +162,6 @@ def get_latest_year_from_index(index) -> str:
     return "2026"
 
 
-# ==========================================
-# FIXED: query_intent parameter added
-# ==========================================
 def query_pinecone_for_timeframe(index, query_vector, month, year, week, query_intent="sentiment"):
     filter_conditions = {}
     if month:
@@ -428,20 +425,44 @@ if user_query and user_query.strip():
         if week_match:
             detected_week = week_match.group(0)
 
+        # ==========================================
+        # INTENT DETECTION — FIXED
+        # ==========================================
+        # Order of priority:
+        # 1. "negative feedback" or complaint words  → complaint (negative only)
+        # 2. "positive feedback" or praise words     → positive (positive only)
+        # 3. "feedback" alone / sentiment words      → sentiment (both)
+
         complaint_keywords = [
-            "complaint", "complaints", "negative", "issues",
-            "problems", "concerns", "issue", "problem"
+            "complaint", "complaints", "negative feedback",
+            "negative", "issues", "problems", "concerns",
+            "issue", "problem"
         ]
         positive_keywords = [
-            "positive", "appreciation", "praise",
-            "favorable", "good feedback", "satisfied"
+            "positive feedback", "appreciation", "praise",
+            "favorable", "satisfied"
+        ]
+        sentiment_keywords = [
+            "sentiment", "sentiments", "overall", "general",
+            "overview", "analysis", "summary", "both",
+            "feedback", "feedbacks"
         ]
 
         query_intent = "sentiment"
-        if any(word in query_lower for word in complaint_keywords):
+
+        # Check complaint first — catches "negative feedback" before feedback alone
+        if any(phrase in query_lower for phrase in complaint_keywords):
             query_intent = "complaint"
-        elif any(word in query_lower for word in positive_keywords):
+
+        # Check explicit positive phrases
+        elif any(phrase in query_lower for phrase in positive_keywords):
             query_intent = "positive"
+
+        # "feedback" alone or sentiment words → both
+        elif any(word in query_lower for word in sentiment_keywords):
+            query_intent = "sentiment"
+
+        # ==========================================
 
         pc    = Pinecone(api_key=PINECONE_API_KEY)
         index = pc.Index(PINECONE_INDEX_NAME)
