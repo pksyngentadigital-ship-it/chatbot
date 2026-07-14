@@ -17,7 +17,6 @@ PINECONE_API_KEY = os.getenv("PINECONE_API_KEY") or st.secrets.get("PINECONE_API
 PINECONE_INDEX_NAME = "chatbot"
 EMBEDDING_DIMENSION = 384
 GROQ_MODEL = "llama-3.1-8b-instant"
-RELEVANCE_THRESHOLD = 0.30  # ← tune this if needed
 
 st.set_page_config(page_title="Weekly Sentiment RAG Engine", layout="wide")
 
@@ -163,41 +162,6 @@ def get_latest_year_from_index(index) -> str:
     return "2026"
 
 
-# ==========================================
-# SEMANTIC RELEVANCE GUARDRAIL
-# Replaces keyword-based filtering entirely.
-# Uses Pinecone vector similarity to decide
-# if the query is relevant to the dataset.
-# ==========================================
-def is_query_relevant(pc, query_vector: list, threshold: float = RELEVANCE_THRESHOLD) -> bool:
-    """
-    Embeds the user query and checks if Pinecone
-    returns at least one match above the threshold.
-    If yes → relevant to dataset → proceed.
-    If no  → off-topic → block with guardrail message.
-    Works for any language, any product name, any phrasing.
-    """
-    try:
-        index = pc.Index(PINECONE_INDEX_NAME)
-        results = index.query(
-            vector=query_vector,
-            top_k=1,
-            include_metadata=False
-        )
-        matches = results.get("matches", [])
-        if not matches:
-            return False
-        top_score = matches[0].get("score", 0.0)
-        return top_score >= threshold
-    except Exception:
-        # If check fails, allow query to proceed
-        # to avoid blocking valid queries on API errors
-        return True
-
-
-# ==========================================
-# FIXED: query_intent parameter added
-# ==========================================
 def query_pinecone_for_timeframe(index, query_vector, month, year, week, query_intent="sentiment"):
     filter_conditions = {}
     if month:
@@ -408,50 +372,38 @@ if user_query and user_query.strip():
         st.markdown(user_query)
     st.session_state.chat_history.append({"role": "user", "content": user_query})
 
+    # ── STRICT TOPIC GUARDRAIL ──
+    allowed_keywords = [
+        "sentiment", "sentiments", "feedback", "product", "syngenta", "cropwise", "app",
+        "price", "unavailability", "january", "february", "march", "april", "may", "june",
+        "july", "august", "september", "october", "november", "december",
+        "jan", "feb", "mar", "apr", "jun", "jul", "aug", "sep", "oct", "nov", "dec",
+        "2024", "2025", "2026", "complaint", "complaints", "positive", "negative",
+        "grower", "advisory", "quantis", "isabion", "week", "1st", "2nd", "3rd",
+        "4th", "5th", "first", "second", "third", "fourth", "fifth",
+        "issues", "concerns", "problems", "appreciation", "praise"
+    ]
+    query_words = re.findall(r'\b\w+\b', user_query.lower())
+    is_relevant = any(word in allowed_keywords for word in query_words)
+
+    if not is_relevant:
+        reply = (
+            "I cannot generate this response. "
+            "I am strictly locked to analyzed dataset metrics "
+            "and cannot find relevant information for this query."
+        )
+        with st.chat_message("assistant"):
+            st.markdown(reply)
+        st.session_state.chat_history.append({"role": "assistant", "content": reply})
+        st.stop()
+
     if not PINECONE_API_KEY:
         with st.chat_message("assistant"):
             st.markdown("🤖 Execution Halted: Pinecone API key is not configured.")
         st.stop()
 
-    # ==========================================
-    # STEP 1: EMBED QUERY FIRST (used for both
-    # guardrail check AND retrieval below)
-    # ==========================================
     with st.spinner("Searching and aggregating matching historical data records..."):
 
-        try:
-            pc = Pinecone(api_key=PINECONE_API_KEY)
-            query_response = pc.inference.embed(
-                model="llama-text-embed-v2",
-                inputs=[user_query],
-                parameters={"input_type": "query", "dimension": EMBEDDING_DIMENSION}
-            )
-            query_vector = query_response[0].values
-        except Exception as e:
-            st.error(f"Query embedding failed: {e}")
-            st.stop()
-
-        # ==========================================
-        # STEP 2: SEMANTIC GUARDRAIL
-        # No keyword list. Pure vector similarity.
-        # Handles any language, any product name,
-        # any phrasing automatically.
-        # ==========================================
-        if not is_query_relevant(pc, query_vector, threshold=RELEVANCE_THRESHOLD):
-            reply = (
-                "I cannot generate this response. "
-                "I am strictly locked to analyzed dataset metrics "
-                "and cannot find relevant information for this query."
-            )
-            with st.chat_message("assistant"):
-                st.markdown(reply)
-            st.session_state.chat_history.append({"role": "assistant", "content": reply})
-            st.stop()
-
-        # ==========================================
-        # STEP 3: TIMEFRAME & INTENT DETECTION
-        # (unchanged from original)
-        # ==========================================
         detected_month = None
         detected_year  = None
         detected_week  = None
@@ -473,22 +425,58 @@ if user_query and user_query.strip():
         if week_match:
             detected_week = week_match.group(0)
 
+        # ==========================================
+        # INTENT DETECTION — FIXED
+        # ==========================================
+        # Order of priority:
+        # 1. "negative feedback" or complaint words  → complaint (negative only)
+        # 2. "positive feedback" or praise words     → positive (positive only)
+        # 3. "feedback" alone / sentiment words      → sentiment (both)
+
         complaint_keywords = [
-            "complaint", "complaints", "negative", "issues",
-            "problems", "concerns", "issue", "problem"
+            "complaint", "complaints", "negative feedback",
+            "negative", "issues", "problems", "concerns",
+            "issue", "problem"
         ]
         positive_keywords = [
-            "positive", "appreciation", "praise",
-            "favorable", "good feedback", "satisfied"
+            "positive feedback", "appreciation", "praise",
+            "favorable", "satisfied"
+        ]
+        sentiment_keywords = [
+            "sentiment", "sentiments", "overall", "general",
+            "overview", "analysis", "summary", "both",
+            "feedback", "feedbacks"
         ]
 
         query_intent = "sentiment"
-        if any(word in query_lower for word in complaint_keywords):
+
+        # Check complaint first — catches "negative feedback" before feedback alone
+        if any(phrase in query_lower for phrase in complaint_keywords):
             query_intent = "complaint"
-        elif any(word in query_lower for word in positive_keywords):
+
+        # Check explicit positive phrases
+        elif any(phrase in query_lower for phrase in positive_keywords):
             query_intent = "positive"
 
+        # "feedback" alone or sentiment words → both
+        elif any(word in query_lower for word in sentiment_keywords):
+            query_intent = "sentiment"
+
+        # ==========================================
+
+        pc    = Pinecone(api_key=PINECONE_API_KEY)
         index = pc.Index(PINECONE_INDEX_NAME)
+
+        try:
+            query_response = pc.inference.embed(
+                model="llama-text-embed-v2",
+                inputs=[user_query],
+                parameters={"input_type": "query", "dimension": EMBEDDING_DIMENSION}
+            )
+            query_vector = query_response[0].values
+        except Exception as e:
+            st.error(f"Query embedding failed: {e}")
+            st.stop()
 
         target_year        = detected_year
         fallback_triggered = False
@@ -585,50 +573,48 @@ if user_query and user_query.strip():
 
     if query_intent == "complaint":
         system_prompt = (
-            "You are an expert agricultural portfolio analyst for Syngenta. "
-            "The user is asking specifically about complaints and negative feedback. "
-            "Write a professional, natural response covering ONLY complaints and concerns. "
-            "Do NOT mention any positive feedback whatsoever.\n\n"
-            "Write one focused paragraph:\n"
-            "Explicitly name every product mentioned in the data and state the exact reason "
-            "for each complaint (e.g., price issues, unavailability, poor results, zero efficacy).\n\n"
+             "You are a smart chatbot analyst for Syngenta. "
+            "Respond naturally like a chatbot, not a formal report. "
+            f"Start your response with a line like: 'The complaints for {timeframe_label} are as follows:' "
+            "or 'Here are the complaints recorded for {timeframe_label}:' — then continue in prose. "
+            "Cover ONLY complaints and concerns. Do NOT mention any positive feedback. "
+            "Explicitly name every product and state the exact reason for each complaint. "
             "Rules:\n"
             "- No bullet points. Prose only.\n"
             "- No bracketed dates or week labels.\n"
             "- Keep it concise (4-6 sentences max).\n"
-            "- Every product in the context must appear with its specific complaint reason."
+            "- Sound like a helpful chatbot, not a corporate report."
         )
     elif query_intent == "positive":
         system_prompt = (
-            "You are an expert agricultural portfolio analyst for Syngenta. "
-            "The user is asking specifically about positive feedback and appreciation. "
-            "Write a professional, natural response covering ONLY positive sentiments. "
-            "Do NOT mention any complaints or negative feedback whatsoever.\n\n"
-            "Write one focused paragraph:\n"
-            "Explicitly name every product mentioned in the data and state the exact reason "
-            "why farmers or users are satisfied with it.\n\n"
+             "You are a smart chatbot analyst for Syngenta. "
+            "Respond naturally like a chatbot, not a formal report. "
+            f"Start your response with a line like: 'The positive feedback for {timeframe_label} looks great!' "
+            "or 'Here is the positive feedback recorded for {timeframe_label}:' — then continue in prose. "
+            "Cover ONLY positive sentiments and appreciation. Do NOT mention any complaints. "
+            "Explicitly name every product and state the exact reason users are satisfied. "
             "Rules:\n"
             "- No bullet points. Prose only.\n"
             "- No bracketed dates or week labels.\n"
             "- Keep it concise (4-6 sentences max).\n"
-            "- Every product in the context must appear with its specific positive reason."
+            "- Sound like a helpful chatbot, not a corporate report."
         )
     else:
         system_prompt = (
-            "You are an expert agricultural portfolio analyst for Syngenta. "
-            "Analyze the provided feedback data and write a professional, natural chatbot response. "
-            "Do NOT include raw metadata tags, bracketed weeks, or IDs in your output. "
-            "Write in clean, flowing English sentences only.\n\n"
+            "You are a smart chatbot analyst for Syngenta. "
+            "Respond naturally like a chatbot, not a formal report. "
+            f"Start your response with a line like: 'Here is the sentiment overview for {timeframe_label}:' "
+            f"or 'The feedback analysis for {timeframe_label} is as follows:' — then continue. "
             "Structure your response in exactly two short paragraphs:\n\n"
             "Paragraph 1 — Favorable Sentiments: Summarize positive trends. "
-            "Explicitly name every product in the positive data and state exactly why users are satisfied.\n\n"
-            "Paragraph 2 — Complaints & Concerns: Summarize issues and queries. "
-            "Explicitly name every product in the negative/query data and state the exact reason for each concern.\n\n"
+            "Explicitly name every product and state exactly why users are satisfied.\n\n"
+            "Paragraph 2 — Complaints & Concerns: Summarize issues. "
+            "Explicitly name every product and state the exact reason for each concern.\n\n"
             "Rules:\n"
             "- No bullet points. Prose only.\n"
             "- No bracketed dates or week labels.\n"
             "- Keep each paragraph concise (3-5 sentences max).\n"
-            "- Every product in the context must appear in your response with its reason."
+            "- Sound like a helpful chatbot, not a corporate report."
         )
 
     user_prompt = (
