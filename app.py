@@ -28,7 +28,7 @@ if "chat_history" not in st.session_state:
 # ==========================================
 # UI STYLING (cosmetic only — agriculture theme)
 # ==========================================
-st.markdown(""" <style> .stApp { background: linear-gradient(180deg, #f3f9f1 0%, #eaf4e6 100%); } section[data-testid="stSidebar"] { background: linear-gradient(180deg, #1b3a24 0%, #0f2417 100%); } section[data-testid="stSidebar"] * { color: #eef7ec !important; } section[data-testid="stSidebar"] input { color: #111 !important; } .hero-title { font-size: 2.15rem; font-weight: 800; background: linear-gradient(90deg, #2e7d32, #558b2f, #33691e); -webkit-background-clip: text; -webkit-text-fill-color: transparent; margin-bottom: 0.1rem; } .hero-subtitle { color: #4b5d4e; font-size: 0.97rem; margin-bottom: 1.2rem; } div[data-testid="stChatMessage"] { border-radius: 16px; padding: 0.7rem 1.1rem; margin-bottom: 0.6rem; box-shadow: 0 1px 5px rgba(46, 125, 50, 0.12); background: #ffffff; border: 1px solid #e3f0e0; } div[data-testid="stChatMessage"] ul { list-style: none; padding-left: 0.1rem; margin-top: 0.4rem; } div[data-testid="stChatMessage"] li { position: relative; padding-left: 1.5rem; margin-bottom: 0.45rem; line-height: 1.45; } div[data-testid="stChatMessage"] li::before { content: "🌱"; position: absolute; left: 0; top: 0; } .intent-badge { display: inline-block; padding: 0.25rem 0.75rem; border-radius: 999px; font-size: 0.8rem; font-weight: 700; margin-bottom: 0.55rem; } .badge-positive { background: #dff5df; color: #256029; } .badge-complaint { background: #fdeaea; color: #9c3b3b; } .badge-sentiment { background: #e3f1e6; color: #2e5d34; } .badge-comparison { background: #eee3f9; color: #5b3a94; } .badge-product { background: #fff3d6; color: #8a5a00; } div[data-testid="stChatInput"] textarea { border-radius: 12px !important; } h1, .hero-title { display: flex; align-items: center; gap: 0.4rem; } </style> """, unsafe_allow_html=True)
+st.markdown(""" <style> .stApp { background: linear-gradient(180deg, #f3f9f1 0%, #eaf4e6 100%); } section[data-testid="stSidebar"] { background: linear-gradient(180deg, #1b3a24 0%, #0f2417 100%); } section[data-testid="stSidebar"] * { color: #eef7ec !important; } section[data-testid="stSidebar"] input { color: #111 !important; } section[data-testid="stSidebar"] button { background-color: #2e7d32 !important; border: 1px solid #256029 !important; border-radius: 8px !important; } section[data-testid="stSidebar"] button, section[data-testid="stSidebar"] button p, section[data-testid="stSidebar"] button span, section[data-testid="stSidebar"] button div { color: #ffffff !important; } section[data-testid="stSidebar"] button:hover { background-color: #256029 !important; border-color: #1b3a24 !important; } section[data-testid="stSidebar"] button:hover, section[data-testid="stSidebar"] button:hover p, section[data-testid="stSidebar"] button:hover span, section[data-testid="stSidebar"] button:hover div { color: #ffffff !important; } .hero-title { font-size: 2.15rem; font-weight: 800; background: linear-gradient(90deg, #2e7d32, #558b2f, #33691e); -webkit-background-clip: text; -webkit-text-fill-color: transparent; margin-bottom: 0.1rem; } .hero-subtitle { color: #4b5d4e; font-size: 0.97rem; margin-bottom: 1.2rem; } div[data-testid="stChatMessage"] { border-radius: 16px; padding: 0.7rem 1.1rem; margin-bottom: 0.6rem; box-shadow: 0 1px 5px rgba(46, 125, 50, 0.10); background: #f2f9f2; border: 1px solid #e2f0e2; } div[data-testid="stChatMessage"] ul { list-style: none; padding-left: 0.1rem; margin-top: 0.4rem; } div[data-testid="stChatMessage"] li { position: relative; padding-left: 1.5rem; margin-bottom: 0.45rem; line-height: 1.45; } div[data-testid="stChatMessage"] li::before { content: "🌱"; position: absolute; left: 0; top: 0; } .intent-badge { display: inline-block; padding: 0.25rem 0.75rem; border-radius: 999px; font-size: 0.8rem; font-weight: 700; margin-bottom: 0.55rem; } .badge-positive { background: #dff5df; color: #256029; } .badge-complaint { background: #fdeaea; color: #9c3b3b; } .badge-sentiment { background: #e3f1e6; color: #2e5d34; } .badge-comparison { background: #eee3f9; color: #5b3a94; } .badge-product { background: #fff3d6; color: #8a5a00; } div[data-testid="stChatInput"] textarea { border-radius: 12px !important; } h1, .hero-title { display: flex; align-items: center; gap: 0.4rem; } </style> """, unsafe_allow_html=True)
 
 # ==========================================
 # SIDEBAR: CREDENTIALS & CONFIG
@@ -188,7 +188,34 @@ def get_latest_year_from_index(index) -> str:
     return "2026"
 
 
-def query_pinecone_for_timeframe(index, query_vector, month, year, week, query_intent="sentiment"):
+def get_max_week_label(index, month, year) -> str | None:
+    """Find the actual latest week label (e.g. '5th Week') stored in the dataset for the given month/year, so 'last week' / 'latest week' queries resolve to a real week instead of a fixed guess."""
+    filter_conditions = {}
+    if month:
+        filter_conditions["month"] = {"$eq": month}
+    if year:
+        filter_conditions["year"] = {"$eq": year}
+    try:
+        dummy_vector = [0.0] * EMBEDDING_DIMENSION
+        results = index.query(
+            vector=dummy_vector, top_k=200, include_metadata=True,
+            filter=filter_conditions if filter_conditions else None
+        )
+        weeks = [m.get("metadata", {}).get("week", "") for m in results.get("matches", [])]
+        weeks = [w for w in weeks if w]
+        if not weeks:
+            return None
+
+        def week_num(w):
+            match = re.search(r'(\d+)', w)
+            return int(match.group(1)) if match else -1
+
+        return max(set(weeks), key=week_num)
+    except Exception:
+        return None
+
+
+def query_pinecone_for_timeframe(index, query_vector, month, year, week, query_intent="sentiment", top_k=100):
     filter_conditions = {}
     if month:
         filter_conditions["month"] = {"$eq": month}
@@ -205,7 +232,7 @@ def query_pinecone_for_timeframe(index, query_vector, month, year, week, query_i
 
     results = index.query(
         vector=query_vector,
-        top_k=100,
+        top_k=top_k,
         include_metadata=True,
         filter=metadata_filter
     )
@@ -420,7 +447,13 @@ def build_system_prompt(query_intent, timeframe_label, explicit_list_format, act
             f"The data context below is divided into clearly labeled sections, one per "
             f"period. Explicitly compare the periods against each other — call out what "
             f"increased, decreased, improved, worsened, or stayed roughly the same. "
-            f"Refer to each period by its exact name.\n"
+            f"Refer to each period by its exact name. "
+            f"CRITICAL: for every point you make, name the specific product it is about "
+            f"(never speak only in generic sentences with no product named), and for each "
+            f"period state plainly whether that product's feedback was positive/satisfactory "
+            f"or negative/unsatisfactory in that period — e.g. 'In {period_names.split(', ')[0]}, "
+            f"growers were satisfied with <Product>, but in the other period they were not.' "
+            f"Do this for every product that appears in the data context.\n"
         )
 
     intent_label = {
@@ -686,6 +719,11 @@ if user_query and user_query.strip():
         detected_year  = all_years[0] if all_years else None
         detected_week  = all_weeks[0] if all_weeks else None
 
+        # ── "last / latest / most recent week" → resolve to the real latest
+        # week label in the data (only when no explicit ordinal week like
+        # "2nd week" was already given) ──
+        wants_last_week = bool(re.search(r'\b(last|latest|most recent|recent)\s+week\b', query_lower))
+
         # ── Explicit "list it out" detection → bullet formatting ──
         explicit_list_format = bool(re.search(r'\blist(ed|ing)?\b|\bbullets?\b|\bbullet\s*points?\b', query_lower))
 
@@ -734,6 +772,25 @@ if user_query and user_query.strip():
         if not active_product:
             active_product = detect_product_dynamic(query_lower, index, query_vector)
 
+        # ── Retrieval vector: once a product is known, search using a
+        # product-focused embedding instead of the raw user phrasing.
+        # This makes "tell me about Axial" behave the same as "give me
+        # feedback of Axial" — retrieval no longer depends on how the
+        # question happens to be worded. ──
+        retrieval_vector = query_vector
+        retrieval_top_k = 100
+        if active_product:
+            try:
+                product_embed_response = pc.inference.embed(
+                    model="llama-text-embed-v2",
+                    inputs=[f"{active_product} product feedback sentiment complaints praise"],
+                    parameters={"input_type": "query", "dimension": EMBEDDING_DIMENSION}
+                )
+                retrieval_vector = product_embed_response[0].values
+                retrieval_top_k = 300
+            except Exception:
+                retrieval_vector = query_vector
+
         # ── Comparison auto-detection: 2+ distinct months/years/weeks
         # mentioned is enough — no "compare" keyword required. ──
         periods = build_comparison_periods(all_months, all_years, all_weeks, index)
@@ -743,7 +800,7 @@ if user_query and user_query.strip():
             period_results = []
             for label, m, y, w in periods:
                 p_pos, p_neg, p_neut = query_pinecone_for_timeframe(
-                    index, query_vector, m, y, w, query_intent
+                    index, retrieval_vector, m, y, w, query_intent, top_k=retrieval_top_k
                 )
                 if active_product:
                     p_pos  = filter_bullets_by_product(p_pos, active_product)
@@ -769,14 +826,14 @@ if user_query and user_query.strip():
                 target_year       = latest_index_year
 
                 pos, neg, neut = query_pinecone_for_timeframe(
-                    index, query_vector, detected_month, target_year, detected_week, query_intent
+                    index, retrieval_vector, detected_month, target_year, detected_week, query_intent, top_k=retrieval_top_k
                 )
 
                 if (len(pos) + len(neg) + len(neut)) == 0:
                     try:
                         fallback_year = str(int(latest_index_year) - 1)
                         pos_fb, neg_fb, neut_fb = query_pinecone_for_timeframe(
-                            index, query_vector, detected_month, fallback_year, detected_week, query_intent
+                            index, retrieval_vector, detected_month, fallback_year, detected_week, query_intent, top_k=retrieval_top_k
                         )
                         if (len(pos_fb) + len(neg_fb) + len(neut_fb)) > 0:
                             target_year        = fallback_year
@@ -784,8 +841,15 @@ if user_query and user_query.strip():
                     except ValueError:
                         pass
 
+            # ── Resolve "last / latest / recent week" to the real latest
+            # week label present in the data for this month/year ──
+            if wants_last_week and not detected_week:
+                resolved_week = get_max_week_label(index, detected_month, target_year)
+                if resolved_week:
+                    detected_week = resolved_week
+
             positive_bullets, negative_bullets, neutral_bullets = query_pinecone_for_timeframe(
-                index, query_vector, detected_month, target_year, detected_week, query_intent
+                index, retrieval_vector, detected_month, target_year, detected_week, query_intent, top_k=retrieval_top_k
             )
 
             # ── Product filter (new) ──
