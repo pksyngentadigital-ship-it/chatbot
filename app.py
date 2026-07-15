@@ -2,6 +2,7 @@ import streamlit as st
 import pandas as pd
 import re
 from io import BytesIO
+from collections import Counter
 from pinecone import Pinecone
 from groq import Groq
 from dotenv import load_dotenv
@@ -9,7 +10,7 @@ import os
 
 # ── APP BUILD MARKER ── (bump this string whenever the file is regenerated,
 # so it's easy to confirm in the sidebar/logs which version is deployed)
-APP_BUILD = "2026-07-15-v7 (anti-hallucination grounding fix)"
+APP_BUILD = "2026-07-15-v8 (VoG capability expansion: layout-aware ingestion, crop/product ranking, suggestions, output formats)"
 
 load_dotenv()
 GROQ_API_KEY = os.getenv("GROQ_API_KEY") or st.secrets.get("GROQ_API_KEY", None)
@@ -32,7 +33,7 @@ if "chat_history" not in st.session_state:
 # ==========================================
 # UI STYLING (cosmetic only — agriculture theme)
 # ==========================================
-st.markdown(""" <style> .stApp { background: linear-gradient(180deg, #f3f9f1 0%, #eaf4e6 100%); } section[data-testid="stSidebar"] { background: linear-gradient(180deg, #1b3a24 0%, #0f2417 100%); } section[data-testid="stSidebar"] * { color: #eef7ec !important; } section[data-testid="stSidebar"] input { color: #111 !important; } section[data-testid="stSidebar"] button { background-color: #2e7d32 !important; border: 1px solid #256029 !important; border-radius: 8px !important; } section[data-testid="stSidebar"] button, section[data-testid="stSidebar"] button p, section[data-testid="stSidebar"] button span, section[data-testid="stSidebar"] button div { color: #ffffff !important; } section[data-testid="stSidebar"] button:hover { background-color: #256029 !important; border-color: #1b3a24 !important; } section[data-testid="stSidebar"] button:hover, section[data-testid="stSidebar"] button:hover p, section[data-testid="stSidebar"] button:hover span, section[data-testid="stSidebar"] button:hover div { color: #ffffff !important; } .hero-title { font-size: 2.15rem; font-weight: 800; background: linear-gradient(90deg, #2e7d32, #558b2f, #33691e); -webkit-background-clip: text; -webkit-text-fill-color: transparent; margin-bottom: 0.1rem; } .hero-subtitle { color: #4b5d4e; font-size: 0.97rem; margin-bottom: 1.2rem; } div[data-testid="stChatMessage"] { border-radius: 16px; padding: 0.7rem 1.1rem; margin-bottom: 0.6rem; box-shadow: 0 1px 5px rgba(46, 125, 50, 0.10); background: #f2f9f2; border: 1px solid #e2f0e2; } div[data-testid="stChatMessage"] ul { list-style: none; padding-left: 0.1rem; margin-top: 0.4rem; } div[data-testid="stChatMessage"] li { position: relative; padding-left: 1.5rem; margin-bottom: 0.45rem; line-height: 1.45; } div[data-testid="stChatMessage"] li::before { content: "🌱"; position: absolute; left: 0; top: 0; } .intent-badge { display: inline-block; padding: 0.25rem 0.75rem; border-radius: 999px; font-size: 0.8rem; font-weight: 700; margin-bottom: 0.55rem; } .badge-positive { background: #dff5df; color: #256029; } .badge-complaint { background: #fdeaea; color: #9c3b3b; } .badge-sentiment { background: #e3f1e6; color: #2e5d34; } .badge-comparison { background: #eee3f9; color: #5b3a94; } .badge-product { background: #fff3d6; color: #8a5a00; } div[data-testid="stChatInput"] textarea { border-radius: 12px !important; } h1, .hero-title { display: flex; align-items: center; gap: 0.4rem; } </style> """, unsafe_allow_html=True)
+st.markdown(""" <style> .stApp { background: linear-gradient(180deg, #f3f9f1 0%, #eaf4e6 100%); } section[data-testid="stSidebar"] { background: linear-gradient(180deg, #1b3a24 0%, #0f2417 100%); } section[data-testid="stSidebar"] * { color: #eef7ec !important; } section[data-testid="stSidebar"] input { color: #111 !important; } section[data-testid="stSidebar"] button { background-color: #2e7d32 !important; border: 1px solid #256029 !important; border-radius: 8px !important; } section[data-testid="stSidebar"] button, section[data-testid="stSidebar"] button p, section[data-testid="stSidebar"] button span, section[data-testid="stSidebar"] button div { color: #ffffff !important; } section[data-testid="stSidebar"] button:hover { background-color: #256029 !important; border-color: #1b3a24 !important; } section[data-testid="stSidebar"] button:hover, section[data-testid="stSidebar"] button:hover p, section[data-testid="stSidebar"] button:hover span, section[data-testid="stSidebar"] button:hover div { color: #ffffff !important; } .hero-title { font-size: 2.15rem; font-weight: 800; background: linear-gradient(90deg, #2e7d32, #558b2f, #33691e); -webkit-background-clip: text; -webkit-text-fill-color: transparent; margin-bottom: 0.1rem; } .hero-subtitle { color: #4b5d4e; font-size: 0.97rem; margin-bottom: 1.2rem; } div[data-testid="stChatMessage"] { border-radius: 16px; padding: 0.7rem 1.1rem; margin-bottom: 0.6rem; box-shadow: 0 1px 5px rgba(46, 125, 50, 0.10); background: #f2f9f2; border: 1px solid #e2f0e2; } div[data-testid="stChatMessage"] ul { list-style: none; padding-left: 0.1rem; margin-top: 0.4rem; } div[data-testid="stChatMessage"] li { position: relative; padding-left: 1.5rem; margin-bottom: 0.45rem; line-height: 1.45; } div[data-testid="stChatMessage"] li::before { content: "🌱"; position: absolute; left: 0; top: 0; } .intent-badge { display: inline-block; padding: 0.25rem 0.75rem; border-radius: 999px; font-size: 0.8rem; font-weight: 700; margin-bottom: 0.55rem; } .badge-positive { background: #dff5df; color: #256029; } .badge-complaint { background: #fdeaea; color: #9c3b3b; } .badge-sentiment { background: #e3f1e6; color: #2e5d34; } .badge-comparison { background: #eee3f9; color: #5b3a94; } .badge-product { background: #fff3d6; color: #8a5a00; } .badge-suggestion { background: #e6e6fa; color: #4b3f8a; } .badge-ranking { background: #fde2c8; color: #8a4b00; } div[data-testid="stChatInput"] textarea { border-radius: 12px !important; } h1, .hero-title { display: flex; align-items: center; gap: 0.4rem; } </style> """, unsafe_allow_html=True)
 
 # ==========================================
 # SIDEBAR: CREDENTIALS & CONFIG
@@ -90,12 +91,18 @@ CATEGORY_NORMALIZE = {
     "complaint negative feedback":  "Complaint/Negative Feedback",
     "complaints":                   "Complaint/Negative Feedback",
     "negative feedback":            "Complaint/Negative Feedback",
+    "suggestion":                   "Suggestions",
+    "suggestions":                  "Suggestions",
     "others":                       "Others",
     "other":                        "Others"
 }
 
 POSITIVE_CATEGORIES = {"Positive Feedback"}
-NEGATIVE_CATEGORIES = {"Complaint/Negative Feedback"}
+# Problem/Advisory rows are grower-reported issues/concerns just like
+# Complaint/Negative Feedback — both feed the "complaint" / "root cause" /
+# "top concerns" style queries.
+NEGATIVE_CATEGORIES = {"Complaint/Negative Feedback", "Problem/Advisory"}
+SUGGESTION_CATEGORY  = "Suggestions"
 
 EMPTY_VALUES = {
     'nan', 'none', '', 'null', '-', 'n/a', 'na',
@@ -104,7 +111,47 @@ EMPTY_VALUES = {
 
 # Known products — matched first (fast path). Extend freely.
 PRODUCT_LIST = [
-    "cropwise", "quantis", "isabion", "allymax", "axial"
+    "cropwise", "quantis", "isabion", "allymax", "axial", "walter", "kaho",
+    "solubor", "amistar", "incipio", "simodis", "solvigo", "rifit",
+    "logran", "cruiser", "enrich", "virtako", "proclaim", "thiovet",
+    "pendimethalin", "polytrin", "chlorpyrifos", "glyphosate", "tilt",
+    "actara", "alika", "ridomil", "score", "folicur", "miraculan",
+    "dual gold", "naya potash"
+]
+
+# Known crops — matched first (fast path) for crop-wise analysis / filtering.
+CROP_LIST = [
+    "wheat", "rice", "paddy", "cotton", "maize", "corn", "sugarcane",
+    "soybean", "soyabean", "groundnut", "mustard", "canola", "potato",
+    "tomato", "onion", "chilli", "chili", "gram", "chickpea", "pea", "peas",
+    "banana", "grape", "grapes", "sunflower", "okra", "lady finger",
+    "ladyfinger", "barley", "jowar", "bajra", "cabbage", "cauliflower",
+    "brinjal", "cucumber", "watermelon", "muskmelon", "melon", "mango",
+    "citrus", "orange", "apple", "turmeric", "ginger", "garlic", "sesame",
+    "castor", "tobacco", "rose", "roses", "papaya", "guava", "pomegranate",
+    "carrot", "radish", "spinach", "cumin", "coriander", "fenugreek"
+]
+
+# Extra business-domain vocabulary the strict topic guardrail must recognize
+# (executive/sales/marketing/digital/advanced-analytics use cases, plus the
+# various output-format requests such as tables, charts, and exports).
+BUSINESS_KEYWORDS = [
+    "suggestion", "suggestions", "recommend", "recommendation",
+    "recommendations", "improvement", "improvements", "expectation",
+    "expectations", "root", "cause", "causes", "trend", "trends",
+    "trending", "rank", "ranking", "ranked", "top", "table", "excel",
+    "export", "download", "ppt", "powerpoint", "presentation", "slide",
+    "slides", "chart", "graph", "visualize", "visualise", "visualization",
+    "visualisation", "dashboard", "executive", "summary", "summarize",
+    "sales", "marketing", "digital", "campaign", "campaigns",
+    "misconception", "misconceptions", "awareness", "yoy", "quarter",
+    "quarterly", "insight", "insights", "strategic", "priority",
+    "priorities", "forecast", "predict", "prediction", "region", "regions",
+    "crop", "crops", "emerging", "satisfaction", "frequency", "frequent",
+    "common", "pattern", "patterns", "hidden", "platform", "platforms",
+    "online", "support", "experience", "customer", "recommended", "most",
+    "highest", "significant", "significantly", "increased", "improve",
+    "business", "monthly", "yearly", "annual", "annually", "breakdown"
 ]
 
 # Generic words that should never be mistaken for a product name during
@@ -151,9 +198,40 @@ def find_category_column(df_columns):
 
 
 def infer_year_for_sheet(sheet_name: str, all_sheet_names: list) -> str | None:
+    """ Sheets that carry an explicit 4-digit year in their name are trusted directly. Older legacy sheets (e.g. "Jan till June", "July till December") have no year in the name at all — for those, infer the year from neighboring dated sheets: a sheet appearing BEFORE the first explicitly-dated sheet is assumed to be from the year immediately preceding that dated sheet (legacy history predates the dated sheets); one appearing AFTER the last dated sheet is assumed to follow it by one year. """
     direct = re.search(r'(20\d{2})', sheet_name.strip())
     if direct:
         return direct.group(0)
+
+    dated = [
+        (i, int(m.group(0)))
+        for i, name in enumerate(all_sheet_names)
+        for m in [re.search(r'(20\d{2})', name.strip())] if m
+    ]
+    if not dated:
+        return None
+
+    try:
+        my_index = all_sheet_names.index(sheet_name) if sheet_name in all_sheet_names else None
+        if my_index is None:
+            for i, name in enumerate(all_sheet_names):
+                if name.strip() == sheet_name:
+                    my_index = i
+                    break
+    except ValueError:
+        my_index = None
+
+    if my_index is None:
+        return None
+
+    later = [year for i, year in dated if i > my_index]
+    if later:
+        return str(min(later) - 1)
+
+    earlier = [year for i, year in dated if i < my_index]
+    if earlier:
+        return str(max(earlier) + 1)
+
     return None
 
 
@@ -237,15 +315,18 @@ def get_max_week_label(index, month, year) -> str | None:
         return None
 
 
-def query_pinecone_for_timeframe(index, query_vector, month, year, week, query_intent="sentiment", top_k=100):
+def query_pinecone_for_timeframe(index, query_vector, month, year, week, query_intent="sentiment", top_k=100, category_filter=None):
     filter_conditions = {}
     if month:
         filter_conditions["month"] = {"$eq": month}
     if year:
         filter_conditions["year"]  = {"$eq": year}
 
+    # ── CATEGORY FILTER (e.g. "Suggestions") TAKES PRIORITY OVER SENTIMENT ──
+    if category_filter:
+        filter_conditions["category"] = {"$eq": category_filter}
     # ── SENTIMENT FILTER AT DATABASE LEVEL ──
-    if query_intent == "positive":
+    elif query_intent == "positive":
         filter_conditions["sentiment"] = {"$eq": "positive"}
     elif query_intent == "complaint":
         filter_conditions["sentiment"] = {"$eq": "negative"}
@@ -401,6 +482,48 @@ def filter_bullets_by_product(bullets: list[str], product: str) -> list[str]:
     return [b for b in bullets if product.lower() in b.lower()]
 
 
+def detect_crop(query_lower: str) -> str | None:
+    """Fast path: match against the curated CROP_LIST (closed vocabulary, no dynamic probe needed)."""
+    for crop in CROP_LIST:
+        if re.search(r'\b' + re.escape(crop) + r'\b', query_lower):
+            return crop
+    return None
+
+
+def filter_bullets_by_crop(bullets: list[str], crop: str) -> list[str]:
+    """Keep only bullets that actually reference the requested crop."""
+    return [b for b in bullets if crop.lower() in b.lower()]
+
+
+def extract_crops(text: str) -> list[str]:
+    """Tag every known crop mentioned in a feedback bullet, for ingestion-time metadata."""
+    text_lower = text.lower()
+    found = []
+    for crop in CROP_LIST:
+        if re.search(r'\b' + re.escape(crop) + r'\b', text_lower):
+            label = crop.title()
+            if label not in found:
+                found.append(label)
+    return found
+
+
+def extract_product_mentions(text: str) -> list[str]:
+    """ Tag likely product/brand names mentioned in a feedback bullet, for ingestion-time metadata used by deterministic ranking ("which product received the highest complaints"). Heuristic: capitalized word sequences (1-3 words) that aren't generic English/stopwords/month names — this generalizes beyond the curated PRODUCT_LIST to any brand name that shows up in the data without needing to hardcode every product. """
+    candidates = re.findall(r'\b([A-Z][a-zA-Z]{2,}(?:\s+[A-Z][a-zA-Z]{2,}){0,2})\b', text)
+    out, seen = [], set()
+    for cand in candidates:
+        words = cand.split()
+        if all(w.lower() in PRODUCT_STOPWORDS or w.lower() in MONTH_MAP for w in words):
+            continue
+        if cand.strip().lower() in ("syngenta",):
+            continue
+        key = cand.strip().lower()
+        if key not in seen:
+            seen.add(key)
+            out.append(cand.strip())
+    return out
+
+
 def build_comparison_periods(all_months, all_years, all_weeks, index):
     """ Build a list of (label, month, year, week) tuples describing each period to compare. The dimension with 2+ distinct values becomes the axis of comparison; other dimensions are held fixed. No explicit "compare" keyword is required — mentioning two+ months/years/weeks is enough. """
     periods = []
@@ -429,60 +552,152 @@ def build_comparison_periods(all_months, all_years, all_weeks, index):
     return periods
 
 
-def build_header(query_intent, timeframe_label, active_product, periods):
-    """ Product and comparison context always take priority over the generic 'period' heading — a product query is labeled with the product name (never falls back to a generic 'sentiment overview for the period' heading), and a comparison query is clearly labeled as a comparison. """
-    product_label = active_product.title() if active_product else None
+def detect_aggregation_request(query_lower: str) -> str | None:
+    """ Detects queries that want a deterministic, counted ranking ("which crop generated the highest number of complaints", "products with the highest complaint frequency") rather than free-form LLM summarization. Returns 'crop' or 'product' — the metadata field to rank by — or None. Kept separate from the normal retrieval flow because counting must be exact (computed in Python from real metadata tags), never left to the LLM to eyeball from a handful of retrieved bullets. """
+    rank_phrases = [
+        'highest number of', 'highest', 'most frequent', 'most complaints',
+        'most common', 'ranking', 'rank ', 'frequency', 'greatest'
+    ]
+    wants_ranking = (
+        any(p in query_lower for p in rank_phrases)
+        or bool(re.search(r'\btop\s+\d+\b', query_lower))
+        or bool(re.search(r'\btop\s+(five|ten|three)\b', query_lower))
+    )
+    if not wants_ranking:
+        return None
+    if 'crop' in query_lower:
+        return 'crop'
+    if 'product' in query_lower:
+        return 'product'
+    return None
+
+
+def fetch_matches_for_aggregation(index, filter_conditions, top_k=1000):
+    """Broad, non-semantic fetch (dummy vector) used purely for exact counting/ranking over metadata tags."""
+    dummy_vector = [0.0] * EMBEDDING_DIMENSION
+    results = index.query(
+        vector=dummy_vector, top_k=top_k, include_metadata=True,
+        filter=filter_conditions if filter_conditions else None
+    )
+    return results.get("matches", [])
+
+
+def rank_by_field(matches, field: str, top_n: int = 10):
+    """Count occurrences of each comma-separated tag value in the given metadata field, most common first."""
+    counter = Counter()
+    for m in matches:
+        raw = m.get("metadata", {}).get(field, "")
+        if not raw:
+            continue
+        for val in str(raw).split(","):
+            val = val.strip()
+            if val:
+                counter[val] += 1
+    return counter.most_common(top_n)
+
+
+def detect_output_format(query_lower: str) -> str | None:
+    """Detects which presentation format the user explicitly asked for."""
+    if re.search(r'\bexcel\b|\bexport\b|\bdownload\b', query_lower):
+        return 'excel'
+    if re.search(r'\bppt\b|\bpowerpoint\b|\bpresentation\b|\bslides?\b', query_lower):
+        return 'ppt'
+    if re.search(r'\bexecutive\s+summary\b|\bone[- ]page\b|\bexec\s+summary\b', query_lower):
+        return 'exec_summary'
+    if re.search(r'\btable\b', query_lower):
+        return 'table'
+    if re.search(r'\bchart\b|\bgraph\b|\bvisuali[sz]e?\b|\bvisuali[sz]ation\b', query_lower):
+        return 'chart'
+    return None
+
+
+def build_subject_label(active_product, active_crop):
+    """Combine crop + product into one display label, e.g. 'Wheat + Isabion'."""
+    parts = []
+    if active_crop:
+        parts.append(active_crop.title())
+    if active_product:
+        parts.append(active_product.title())
+    return " + ".join(parts) if parts else None
+
+
+def build_header(query_intent, timeframe_label, active_product, periods, active_crop=None):
+    """ Product/crop and comparison context always take priority over the generic 'period' heading — a product or crop query is labeled with its subject (never falls back to a generic 'sentiment overview for the period' heading), and a comparison query is clearly labeled as a comparison. """
+    subject_label = build_subject_label(active_product, active_crop)
 
     if periods:
         period_join = " 🆚 ".join(p[0] for p in periods)
-        subject = f"{product_label} — " if active_product else ""
+        subject = f"{subject_label} — " if subject_label else ""
         if query_intent == "complaint":
             return f"🔀 {subject}Complaints Comparison: {period_join}\n\n"
         elif query_intent == "positive":
             return f"🔀 {subject}Positive Feedback Comparison: {period_join}\n\n"
+        elif query_intent == "suggestion":
+            return f"🔀 {subject}Suggestions Comparison: {period_join}\n\n"
         else:
             return f"🔀 {subject}Sentiment Comparison: {period_join}\n\n"
 
-    if active_product:
+    if subject_label:
         suffix = f" ({timeframe_label})" if timeframe_label != "the requested period" else ""
         if query_intent == "complaint":
-            return f"🐛 Complaints about {product_label}{suffix}:\n\n"
+            return f"🐛 Complaints about {subject_label}{suffix}:\n\n"
         elif query_intent == "positive":
-            return f"🌻 Positive Feedback about {product_label}{suffix}:\n\n"
+            return f"🌻 Positive Feedback about {subject_label}{suffix}:\n\n"
+        elif query_intent == "suggestion":
+            return f"💡 Suggestions about {subject_label}{suffix}:\n\n"
         else:
-            return f"🌾 {product_label} — Sentiment Overview{suffix}:\n\n"
+            return f"🌾 {subject_label} — Sentiment Overview{suffix}:\n\n"
 
     if query_intent == "complaint":
         return f"🐛 Complaints of {timeframe_label}:\n\n"
     elif query_intent == "positive":
         return f"🌻 Positive Feedback of {timeframe_label}:\n\n"
+    elif query_intent == "suggestion":
+        return f"💡 Suggestions & Improvement Ideas for {timeframe_label}:\n\n"
     else:
         return f"🌾 Sentiments of {timeframe_label}:\n\n"
 
 
-def build_intent_badge(query_intent, active_product, periods):
+def build_intent_badge(query_intent, active_product, periods, active_crop=None):
     """Small colored pill shown above the streamed answer — purely cosmetic."""
+    subject_label = build_subject_label(active_product, active_crop)
     if periods:
         return '<span class="intent-badge badge-comparison">🔀 Comparison</span>'
-    if active_product:
-        return f'<span class="intent-badge badge-product">🏷️ Product: {active_product.title()}</span>'
+    if subject_label:
+        return f'<span class="intent-badge badge-product">🏷️ {subject_label}</span>'
     if query_intent == "complaint":
         return '<span class="intent-badge badge-complaint">🐛 Complaints</span>'
     if query_intent == "positive":
         return '<span class="intent-badge badge-positive">🌻 Positive</span>'
+    if query_intent == "suggestion":
+        return '<span class="intent-badge badge-suggestion">💡 Suggestions</span>'
     return '<span class="intent-badge badge-sentiment">🌾 Sentiment Overview</span>'
 
 
-def build_system_prompt(query_intent, timeframe_label, explicit_list_format, active_product, periods):
-    """ Unified prompt builder. Preserves the original prose behaviour (including the two-paragraph favorable/complaints structure for the default sentiment case) while adding: real markdown bullet formatting when the user explicitly asks to "list" something, strict single-product focus, and explicit period-by-period comparison instructions. """
+def build_system_prompt(query_intent, timeframe_label, explicit_list_format, active_product, periods, active_crop=None, output_format=None):
+    """ Unified prompt builder. Preserves the original prose behaviour (including the two-paragraph favorable/complaints structure for the default sentiment case) while adding: real markdown bullet formatting when the user explicitly asks to "list" something, strict single-product/crop focus, explicit period-by-period comparison instructions, and output-format overrides (table / executive summary / PPT outline). """
     product_label = active_product.title() if active_product else None
+    crop_label = active_crop.title() if active_crop else None
 
-    if active_product:
+    if active_product and active_crop:
+        product_clause = (
+            f"Focus EXCLUSIVELY on the product '{product_label}' as it relates to the "
+            f"crop '{crop_label}'. Do NOT mention any other product or crop, even if "
+            f"they appear in the data context.\n"
+        )
+    elif active_product:
         product_clause = (
             f"Focus EXCLUSIVELY on the product '{product_label}'. Do NOT mention, "
             f"reference, or summarize information about any other product, even if "
             f"other products appear in the data context — ignore anything not about "
             f"'{product_label}'.\n"
+        )
+    elif active_crop:
+        product_clause = (
+            f"Focus EXCLUSIVELY on the crop '{crop_label}'. Do NOT mention, reference, "
+            f"or summarize information about any other crop, even if other crops appear "
+            f"in the data context — ignore anything not about '{crop_label}'. Still name "
+            f"every product mentioned in connection with '{crop_label}'.\n"
         )
     else:
         product_clause = (
@@ -508,18 +723,44 @@ def build_system_prompt(query_intent, timeframe_label, explicit_list_format, act
         )
 
     intent_label = {
-        "complaint":  "complaints and concerns",
+        "complaint":  "complaints and concerns (including root-cause issues)",
         "positive":   "positive feedback and appreciation",
+        "suggestion": "grower suggestions and improvement recommendations",
         "sentiment":  "overall sentiment (both positive and negative)"
     }[query_intent]
 
     opening_hint = {
         "complaint":  f"e.g. 'Here are the complaints for {timeframe_label}:'",
         "positive":   f"e.g. 'The positive feedback for {timeframe_label} looks great!'",
+        "suggestion": f"e.g. 'Here are the grower suggestions for {timeframe_label}:'",
         "sentiment":  f"e.g. 'Here is the sentiment overview for {timeframe_label}:'"
     }[query_intent]
-    if active_product:
-        opening_hint = f"e.g. 'Here's what growers are saying about {product_label}:'"
+    subject_label = build_subject_label(active_product, active_crop)
+    if subject_label:
+        opening_hint = f"e.g. 'Here's what growers are saying about {subject_label}:'"
+
+    output_format_clause = ""
+    if output_format == "table":
+        output_format_clause = (
+            "OUTPUT FORMAT OVERRIDE: Format your ENTIRE response as a markdown table "
+            "with columns '| Category | Feedback |'. One data point per row. No prose "
+            "outside the table.\n"
+        )
+    elif output_format == "exec_summary":
+        output_format_clause = (
+            "OUTPUT FORMAT OVERRIDE: Write a one-page executive summary with these "
+            "bold section headers on their own lines, in order: '*Headline:*' (one "
+            "sentence takeaway), '*Key Insights:*' (3-5 bullet points, one specific "
+            "point each), '*Recommendation:*' (1-2 sentences on what to do next).\n"
+        )
+    elif output_format == "ppt":
+        output_format_clause = (
+            "OUTPUT FORMAT OVERRIDE: Format your response as a PowerPoint-ready slide "
+            "outline. Use '*Slide 1: <short title>*' on its own line, followed by "
+            "3-5 short bullet points (each starting with '- '), then a blank line "
+            "before the next slide if more than one slide is warranted. Keep every "
+            "bullet short enough to fit on a slide (under 15 words).\n"
+        )
 
     if explicit_list_format:
         format_clause = (
@@ -557,6 +798,12 @@ def build_system_prompt(query_intent, timeframe_label, explicit_list_format, act
             )
         else:
             structure_clause = "Keep the response to 4-6 sentences max.\n"
+
+    # An explicit output-format request (table / exec summary / PPT outline)
+    # always wins over the default bullet/prose formatting instructions.
+    if output_format_clause:
+        format_clause = output_format_clause
+        structure_clause = ""
 
     system_prompt = (
         "You are a smart, friendly chatbot analyst for Syngenta, an agriculture company. "
@@ -610,6 +857,32 @@ if st.session_state.authenticated:
                     text_inputs_for_embedding = []
                     discovered_data_summary   = {}
 
+                    def make_metadata_payload(inferred_year, row_month, week_label, category, bullet):
+                        is_positive = category in POSITIVE_CATEGORIES
+                        is_negative = category in NEGATIVE_CATEGORIES
+                        context_chunk = (
+                            f"Year: {inferred_year}. "
+                            f"Month: {row_month}. "
+                            f"Week: {week_label}. "
+                            f"Case Category: {category}. "
+                            f"Feedback: {bullet}."
+                        )
+                        return context_chunk, {
+                            "text":      context_chunk,
+                            "month":     row_month,
+                            "year":      inferred_year,
+                            "week":      week_label,
+                            "category":  category,
+                            "sentiment": (
+                                "positive" if is_positive
+                                else "negative" if is_negative
+                                else "neutral"
+                            ),
+                            "value":    bullet,
+                            "crop":     ",".join(extract_crops(bullet)),
+                            "products": ",".join(extract_product_mentions(bullet)),
+                        }
+
                     for sheet_name in all_sheets:
                         sheet_clean   = sheet_name.strip()
                         inferred_year = infer_year_for_sheet(sheet_clean, all_sheets)
@@ -620,67 +893,126 @@ if st.session_state.authenticated:
                         df.columns = [re.sub(r'\s+', ' ', str(c)).strip() for c in df.columns]
 
                         cat_col = find_category_column(df.columns)
-                        if not cat_col:
-                            continue
 
-                        week_cols = [c for c in df.columns if 'week' in c.lower()]
+                        if cat_col:
+                            # ── LAYOUT A: categories are ROWS, weeks are COLUMNS ──
+                            # (this is how every explicitly-year-labeled sheet, e.g.
+                            # "Jan till Dec 2024", is structured)
+                            week_cols = [c for c in df.columns if 'week' in c.lower()]
 
-                        for idx, row in df.iterrows():
-                            raw_category = row.get(cat_col, None)
-                            category     = normalize_category(raw_category)
+                            for idx, row in df.iterrows():
+                                raw_category = row.get(cat_col, None)
+                                category     = normalize_category(raw_category)
 
-                            if not category or str(raw_category).strip().lower() in EMPTY_VALUES:
-                                continue
-
-                            is_positive = category in POSITIVE_CATEGORIES
-                            is_negative = category in NEGATIVE_CATEGORIES
-
-                            for col in week_cols:
-                                cell_raw = str(row[col]).strip()
-
-                                if is_empty_cell(cell_raw):
+                                if not category or str(raw_category).strip().lower() in EMPTY_VALUES:
                                     continue
 
-                                bullets = split_bullets(cell_raw)
-                                if not bullets:
-                                    continue
+                                for col in week_cols:
+                                    cell_raw = str(row[col]).strip()
+                                    if is_empty_cell(cell_raw):
+                                        continue
 
-                                row_month = extract_month_from_col(col)
-                                stat_key  = f"{row_month} {inferred_year}"
-                                discovered_data_summary[stat_key] = (
-                                    discovered_data_summary.get(stat_key, 0) + len(bullets)
-                                )
+                                    bullets = split_bullets(cell_raw)
+                                    if not bullets:
+                                        continue
 
-                                for b_idx, bullet in enumerate(bullets):
-                                    context_chunk = (
-                                        f"Year: {inferred_year}. "
-                                        f"Month: {row_month}. "
-                                        f"Week: {col}. "
-                                        f"Case Category: {category}. "
-                                        f"Feedback: {bullet}."
+                                    row_month = extract_month_from_col(col)
+                                    stat_key  = f"{row_month} {inferred_year}"
+                                    discovered_data_summary[stat_key] = (
+                                        discovered_data_summary.get(stat_key, 0) + len(bullets)
                                     )
 
-                                    metadata_payload = {
-                                        "text":      context_chunk,
-                                        "month":     row_month,
-                                        "year":      inferred_year,
-                                        "week":      col,
-                                        "category":  category,
-                                        "sentiment": (
-                                            "positive" if is_positive
-                                            else "negative" if is_negative
-                                            else "neutral"
-                                        ),
-                                        "value": bullet
-                                    }
+                                    for b_idx, bullet in enumerate(bullets):
+                                        context_chunk, metadata_payload = make_metadata_payload(
+                                            inferred_year, row_month, col, category, bullet
+                                        )
+                                        clean_cat   = re.sub(r'[^a-zA-Z0-9]', '', category.replace(' ', '_'))
+                                        clean_col   = re.sub(r'[^a-zA-Z0-9]', '', col.replace(' ', '_'))
+                                        clean_sheet = re.sub(r'[^a-zA-Z0-9]', '', sheet_clean.replace(' ', '_'))
+                                        vector_id   = f"v_{clean_sheet}{clean_cat}{clean_col}{idx}{b_idx}"
 
-                                    clean_cat   = re.sub(r'[^a-zA-Z0-9]', '', category.replace(' ', '_'))
-                                    clean_col   = re.sub(r'[^a-zA-Z0-9]', '', col.replace(' ', '_'))
-                                    clean_sheet = re.sub(r'[^a-zA-Z0-9]', '', sheet_clean.replace(' ', '_'))
-                                    vector_id   = f"v_{clean_sheet}{clean_cat}{clean_col}{idx}{b_idx}"
+                                        payload_batch.append({"id": vector_id, "metadata": metadata_payload})
+                                        text_inputs_for_embedding.append(context_chunk)
 
-                                    payload_batch.append({"id": vector_id, "metadata": metadata_payload})
-                                    text_inputs_for_embedding.append(context_chunk)
+                        else:
+                            # ── LAYOUT B: Month/Week are ROW values, categories are
+                            # COLUMN headers (e.g. the legacy undated sheets). Locate
+                            # the real header row (the one containing a "Month" cell),
+                            # then forward-fill Month/Week down merged blocks. ──
+                            df_raw = pd.read_excel(excel_file, sheet_name=sheet_name, header=None)
+
+                            header_row_idx = None
+                            for i in range(min(10, len(df_raw))):
+                                row_vals = [str(v).strip().lower() for v in df_raw.iloc[i].tolist()]
+                                if 'month' in row_vals:
+                                    header_row_idx = i
+                                    break
+                            if header_row_idx is None:
+                                continue
+
+                            col_map = {}
+                            for j, v in enumerate(df_raw.iloc[header_row_idx].tolist()):
+                                text = re.sub(r'\s+', ' ', str(v)).strip()
+                                if text and text.lower() != 'nan':
+                                    col_map[j] = text
+
+                            month_col_idx = next((i for i, v in col_map.items() if v.strip().lower() == 'month'), None)
+                            week_col_idx  = next((i for i, v in col_map.items() if v.strip().lower() == 'week'), None)
+                            category_cols = {i: v for i, v in col_map.items() if i not in (month_col_idx, week_col_idx)}
+                            if month_col_idx is None or not category_cols:
+                                continue
+
+                            current_month = None
+                            current_week  = None
+                            for r in range(header_row_idx + 1, len(df_raw)):
+                                row = df_raw.iloc[r]
+
+                                mval = row[month_col_idx]
+                                if pd.notna(mval) and str(mval).strip():
+                                    current_month = extract_month_from_col(str(mval).strip())
+
+                                if week_col_idx is not None:
+                                    wval = row[week_col_idx]
+                                    if pd.notna(wval) and str(wval).strip():
+                                        current_week = str(wval).strip()
+
+                                if not current_month:
+                                    continue
+
+                                week_label = f"{current_week} Week {current_month}" if current_week else current_month
+
+                                for col_idx, raw_category_name in category_cols.items():
+                                    category = normalize_category(raw_category_name)
+                                    if not category:
+                                        continue
+
+                                    cell_val = row[col_idx]
+                                    if pd.isna(cell_val):
+                                        continue
+                                    cell_raw = str(cell_val).strip()
+                                    if is_empty_cell(cell_raw):
+                                        continue
+
+                                    bullets = split_bullets(cell_raw)
+                                    if not bullets:
+                                        continue
+
+                                    stat_key = f"{current_month} {inferred_year}"
+                                    discovered_data_summary[stat_key] = (
+                                        discovered_data_summary.get(stat_key, 0) + len(bullets)
+                                    )
+
+                                    for b_idx, bullet in enumerate(bullets):
+                                        context_chunk, metadata_payload = make_metadata_payload(
+                                            inferred_year, current_month, week_label, category, bullet
+                                        )
+                                        clean_cat   = re.sub(r'[^a-zA-Z0-9]', '', category.replace(' ', '_'))
+                                        clean_week  = re.sub(r'[^a-zA-Z0-9]', '', week_label.replace(' ', '_'))
+                                        clean_sheet = re.sub(r'[^a-zA-Z0-9]', '', sheet_clean.replace(' ', '_'))
+                                        vector_id   = f"v_{clean_sheet}{clean_cat}{clean_week}{r}{b_idx}"
+
+                                        payload_batch.append({"id": vector_id, "metadata": metadata_payload})
+                                        text_inputs_for_embedding.append(context_chunk)
 
                     total_records = len(payload_batch)
                     if total_records == 0:
@@ -740,17 +1072,17 @@ if user_query and user_query.strip():
     st.session_state.chat_history.append({"role": "user", "content": user_query})
 
     # ── STRICT TOPIC GUARDRAIL ──
-    allowed_keywords = [
-        "sentiment", "sentiments", "feedback", "product", "syngenta", "cropwise", "app",
-        "price", "unavailability", "january", "february", "march", "april", "may", "june",
-        "july", "august", "september", "october", "november", "december",
-        "jan", "feb", "mar", "apr", "jun", "jul", "aug", "sep", "oct", "nov", "dec",
-        "2024", "2025", "2026", "complaint", "complaints", "positive", "negative",
-        "grower", "advisory", "quantis", "isabion", "week", "1st", "2nd", "3rd",
-        "4th", "5th", "first", "second", "third", "fourth", "fifth",
-        "issues", "concerns", "problems", "appreciation", "praise",
-        "compare", "comparison", "versus", "allymax", "axial", "list"
-    ]
+    allowed_keywords = set([
+        "sentiment", "sentiments", "feedback", "feedbacks", "product", "products",
+        "syngenta", "cropwise", "app", "price", "unavailability", "january",
+        "february", "march", "april", "may", "june", "july", "august", "september",
+        "october", "november", "december", "jan", "feb", "mar", "apr", "jun", "jul",
+        "aug", "sep", "oct", "nov", "dec", "2023", "2024", "2025", "2026", "2027",
+        "complaint", "complaints", "positive", "negative", "grower", "growers",
+        "advisory", "week", "weeks", "1st", "2nd", "3rd", "4th", "5th", "first",
+        "second", "third", "fourth", "fifth", "issues", "concerns", "problems",
+        "appreciation", "praise", "compare", "comparison", "versus", "list"
+    ]) | set(PRODUCT_LIST) | set(CROP_LIST) | set(BUSINESS_KEYWORDS)
     query_words = re.findall(r'\b\w+\b', user_query.lower())
     is_relevant = any(word in allowed_keywords for word in query_words)
 
@@ -791,17 +1123,28 @@ if user_query and user_query.strip():
         # ── Explicit "list it out" detection → bullet formatting ──
         explicit_list_format = bool(re.search(r'\blist(ed|ing)?\b|\bbullets?\b|\bbullet\s*points?\b', query_lower))
 
+        # ── Output format the user explicitly asked for (table / exec summary / PPT / chart / excel) ──
+        output_format = detect_output_format(query_lower)
+
+        # ── Deterministic ranking request ("which crop/product generated the highest...") ──
+        aggregation_dimension = detect_aggregation_request(query_lower)
+
         # ==========================================
-        # INTENT DETECTION (unchanged priority order)
+        # INTENT DETECTION
         # ==========================================
         complaint_keywords = [
             "complaint", "complaints", "negative feedback",
             "negative", "issues", "problems", "concerns",
-            "issue", "problem"
+            "issue", "problem", "root cause", "root causes"
         ]
         positive_keywords = [
             "positive feedback", "appreciation", "praise",
             "favorable", "satisfied"
+        ]
+        suggestion_keywords = [
+            "suggestion", "suggestions", "recommend", "recommendation",
+            "recommendations", "improvement", "improvements",
+            "expectation", "expectations"
         ]
         sentiment_keywords = [
             "sentiment", "sentiments", "overall", "general",
@@ -814,11 +1157,34 @@ if user_query and user_query.strip():
             query_intent = "complaint"
         elif any(phrase in query_lower for phrase in positive_keywords):
             query_intent = "positive"
+        elif any(phrase in query_lower for phrase in suggestion_keywords):
+            query_intent = "suggestion"
         elif any(word in query_lower for word in sentiment_keywords):
             query_intent = "sentiment"
 
+        category_filter = SUGGESTION_CATEGORY if query_intent == "suggestion" else None
+
         pc    = Pinecone(api_key=PINECONE_API_KEY)
         index = pc.Index(PINECONE_INDEX_NAME)
+
+        # ── "year-over-year" / "YoY" / "last year" / "this year" phrasing →
+        # resolve to concrete years when the user didn't name them explicitly ──
+        if not all_years:
+            if re.search(r'\byear[- ]over[- ]year\b|\byoy\b', query_lower):
+                latest = get_latest_year_from_index(index)
+                try:
+                    all_years = [str(int(latest) - 1), latest]
+                except ValueError:
+                    pass
+            elif re.search(r'\blast\s+year\b', query_lower):
+                latest = get_latest_year_from_index(index)
+                try:
+                    all_years = [str(int(latest) - 1)]
+                except ValueError:
+                    pass
+            elif re.search(r'\bthis\s+year\b|\bcurrent\s+year\b', query_lower):
+                all_years = [get_latest_year_from_index(index)]
+            detected_year = all_years[0] if all_years else None
 
         try:
             query_response = pc.inference.embed(
@@ -831,29 +1197,88 @@ if user_query and user_query.strip():
             st.error(f"Query embedding failed: {e}")
             st.stop()
 
-        # ── Product detection: curated list first, dynamic probe fallback ──
+        # ── Product & crop detection: curated list first, dynamic probe fallback (product only) ──
         active_product = detect_product_known(query_lower)
         if not active_product:
             active_product = detect_product_dynamic(query_lower, index, pc)
+        active_crop = detect_crop(query_lower)
 
-        # ── Retrieval vector: once a product is known, search using a
-        # product-focused embedding instead of the raw user phrasing.
-        # This makes "tell me about Axial" behave the same as "give me
-        # feedback of Axial" — retrieval no longer depends on how the
-        # question happens to be worded. ──
+        # ── Retrieval vector: once a product/crop is known, search using a
+        # focused embedding instead of the raw user phrasing. This makes
+        # "tell me about Axial" behave the same as "give me feedback of
+        # Axial" — retrieval no longer depends on how the question happens
+        # to be worded. ──
         retrieval_vector = query_vector
         retrieval_top_k = 100
-        if active_product:
+        subject_for_embed = " ".join(filter(None, [active_crop, active_product]))
+        if subject_for_embed:
             try:
                 product_embed_response = pc.inference.embed(
                     model="llama-text-embed-v2",
-                    inputs=[f"{active_product} product feedback sentiment complaints praise"],
+                    inputs=[f"{subject_for_embed} product feedback sentiment complaints praise"],
                     parameters={"input_type": "query", "dimension": EMBEDDING_DIMENSION}
                 )
                 retrieval_vector = product_embed_response[0].values
                 retrieval_top_k = 300
             except Exception:
                 retrieval_vector = query_vector
+
+        # ── Deterministic ranking path ("which crop/product generated the
+        # highest number of complaints") — computed by exact counting over
+        # metadata tags, never left to the LLM to eyeball. Bypasses the
+        # normal retrieval/LLM flow entirely. ──
+        if aggregation_dimension:
+            agg_filter = {}
+            if detected_month:
+                agg_filter["month"] = {"$eq": detected_month}
+            if detected_year:
+                agg_filter["year"] = {"$eq": detected_year}
+            if query_intent == "positive":
+                agg_filter["sentiment"] = {"$eq": "positive"}
+            elif query_intent == "complaint":
+                agg_filter["sentiment"] = {"$eq": "negative"}
+            elif category_filter:
+                agg_filter["category"] = {"$eq": category_filter}
+
+            agg_matches = fetch_matches_for_aggregation(index, agg_filter, top_k=1000)
+            field = "crop" if aggregation_dimension == "crop" else "products"
+            ranking = rank_by_field(agg_matches, field, top_n=10)
+
+            badge = f'<span class="intent-badge badge-ranking">📊 {aggregation_dimension.title()} Ranking</span>'
+            scope_bits = []
+            if detected_month:
+                scope_bits.append(detected_month)
+            if detected_year:
+                scope_bits.append(detected_year)
+            scope_label = " ".join(scope_bits) if scope_bits else "all available data"
+            header = f"📊 {aggregation_dimension.title()}-wise Ranking ({scope_label}):\n\n"
+
+            if not ranking:
+                reply = (
+                    f"{badge}\n\n{header}No {aggregation_dimension} tags were found in the matched "
+                    f"records for {scope_label} — nothing to rank."
+                )
+            else:
+                table_lines = ["| Rank | " + aggregation_dimension.title() + " | Mentions |", "|---|---|---|"]
+                for i, (name, count) in enumerate(ranking, start=1):
+                    table_lines.append(f"| {i} | {name} | {count} |")
+                top_name, top_count = ranking[0]
+                reply = (
+                    f"{badge}\n\n{header}"
+                    f"Based on {len(agg_matches)} matched records, **{top_name}** ranks highest "
+                    f"with {top_count} mention{'s' if top_count != 1 else ''}.\n\n"
+                    + "\n".join(table_lines)
+                )
+
+            with st.chat_message("assistant"):
+                st.markdown(reply, unsafe_allow_html=True)
+                if ranking:
+                    chart_df = pd.DataFrame(
+                        {aggregation_dimension.title(): [n for n, _ in ranking], "Mentions": [c for _, c in ranking]}
+                    ).set_index(aggregation_dimension.title())
+                    st.bar_chart(chart_df)
+            st.session_state.chat_history.append({"role": "assistant", "content": reply})
+            st.stop()
 
         # ── Comparison auto-detection: 2+ distinct months/years/weeks
         # mentioned is enough — no "compare" keyword required. ──
@@ -864,12 +1289,16 @@ if user_query and user_query.strip():
             period_results = []
             for label, m, y, w in periods:
                 p_pos, p_neg, p_neut = query_pinecone_for_timeframe(
-                    index, retrieval_vector, m, y, w, query_intent, top_k=retrieval_top_k
+                    index, retrieval_vector, m, y, w, query_intent, top_k=retrieval_top_k, category_filter=category_filter
                 )
                 if active_product:
                     p_pos  = filter_bullets_by_product(p_pos, active_product)
                     p_neg  = filter_bullets_by_product(p_neg, active_product)
                     p_neut = filter_bullets_by_product(p_neut, active_product)
+                if active_crop:
+                    p_pos  = filter_bullets_by_crop(p_pos, active_crop)
+                    p_neg  = filter_bullets_by_crop(p_neg, active_crop)
+                    p_neut = filter_bullets_by_crop(p_neut, active_crop)
 
                 MAX_BULLETS = 12
                 period_results.append((label, p_pos[:MAX_BULLETS], p_neg[:MAX_BULLETS], p_neut[:MAX_BULLETS]))
@@ -890,14 +1319,14 @@ if user_query and user_query.strip():
                 target_year       = latest_index_year
 
                 pos, neg, neut = query_pinecone_for_timeframe(
-                    index, retrieval_vector, detected_month, target_year, detected_week, query_intent, top_k=retrieval_top_k
+                    index, retrieval_vector, detected_month, target_year, detected_week, query_intent, top_k=retrieval_top_k, category_filter=category_filter
                 )
 
                 if (len(pos) + len(neg) + len(neut)) == 0:
                     try:
                         fallback_year = str(int(latest_index_year) - 1)
                         pos_fb, neg_fb, neut_fb = query_pinecone_for_timeframe(
-                            index, retrieval_vector, detected_month, fallback_year, detected_week, query_intent, top_k=retrieval_top_k
+                            index, retrieval_vector, detected_month, fallback_year, detected_week, query_intent, top_k=retrieval_top_k, category_filter=category_filter
                         )
                         if (len(pos_fb) + len(neg_fb) + len(neut_fb)) > 0:
                             target_year        = fallback_year
@@ -913,14 +1342,18 @@ if user_query and user_query.strip():
                     detected_week = resolved_week
 
             positive_bullets, negative_bullets, neutral_bullets = query_pinecone_for_timeframe(
-                index, retrieval_vector, detected_month, target_year, detected_week, query_intent, top_k=retrieval_top_k
+                index, retrieval_vector, detected_month, target_year, detected_week, query_intent, top_k=retrieval_top_k, category_filter=category_filter
             )
 
-            # ── Product filter (new) ──
+            # ── Product / crop filter ──
             if active_product:
                 positive_bullets = filter_bullets_by_product(positive_bullets, active_product)
                 negative_bullets = filter_bullets_by_product(negative_bullets, active_product)
                 neutral_bullets  = filter_bullets_by_product(neutral_bullets, active_product)
+            if active_crop:
+                positive_bullets = filter_bullets_by_crop(positive_bullets, active_crop)
+                negative_bullets = filter_bullets_by_crop(negative_bullets, active_crop)
+                neutral_bullets  = filter_bullets_by_crop(neutral_bullets, active_crop)
 
             total_found = len(positive_bullets) + len(negative_bullets) + len(neutral_bullets)
 
@@ -946,19 +1379,20 @@ if user_query and user_query.strip():
                 f"ℹ️ Year not specified. Defaulting to the latest available dataset year: {target_year}"
             )
 
-    header = build_header(query_intent, timeframe_label, active_product, periods)
-    badge  = build_intent_badge(query_intent, active_product, periods)
+    header = build_header(query_intent, timeframe_label, active_product, periods, active_crop)
+    badge  = build_intent_badge(query_intent, active_product, periods, active_crop)
+    subject_label = build_subject_label(active_product, active_crop)
 
     if total_found == 0:
         if periods:
-            subject = f" for {active_product.title()}" if active_product else ""
+            subject = f" for {subject_label}" if subject_label else ""
             reply = (
                 f"{badge}\n\n{header}"
                 f"No data found{subject} for the compared periods: {timeframe_label}."
             )
-        elif active_product:
+        elif subject_label:
             suffix = f" in {timeframe_label}" if timeframe_label != "the requested period" else " in the ingested dataset"
-            reply = f"{badge}\n\n{header}No data found for '{active_product.title()}'{suffix}."
+            reply = f"{badge}\n\n{header}No data found for '{subject_label}'{suffix}."
         elif detected_month or detected_year or detected_week:
             reply = (
                 f"{badge}\n\n{header}"
@@ -988,6 +1422,9 @@ if user_query and user_query.strip():
             elif query_intent == "positive":
                 neg = []
                 neut = []
+            elif query_intent == "suggestion":
+                pos = []
+                neg = []
             if pos:
                 section_lines.append("POSITIVE DATA:\n" + "\n".join(pos))
             if neg:
@@ -1007,6 +1444,10 @@ if user_query and user_query.strip():
             positive_bullets = positive_bullets[:MAX_BULLETS]
             negative_bullets = []
             neutral_bullets  = []
+        elif query_intent == "suggestion":
+            positive_bullets = []
+            negative_bullets = []
+            neutral_bullets  = neutral_bullets[:MAX_BULLETS]
         else:
             positive_bullets = positive_bullets[:MAX_BULLETS]
             negative_bullets = negative_bullets[:MAX_BULLETS]
@@ -1025,7 +1466,8 @@ if user_query and user_query.strip():
         combined_context = "\n\n".join(context_parts)
 
     system_prompt = build_system_prompt(
-        query_intent, timeframe_label, explicit_list_format, active_product, periods
+        query_intent, timeframe_label, explicit_list_format, active_product, periods,
+        active_crop=active_crop, output_format=output_format
     )
 
     user_prompt = (
@@ -1044,6 +1486,8 @@ if user_query and user_query.strip():
         try:
             groq_client = Groq(api_key=GROQ_API_KEY)
 
+            response_token_budget = 900 if output_format in ("exec_summary", "table", "ppt") else 500
+
             stream = groq_client.chat.completions.create(
                 model=GROQ_MODEL,
                 messages=[
@@ -1051,7 +1495,7 @@ if user_query and user_query.strip():
                     {"role": "user",   "content": user_prompt}
                 ],
                 temperature=0.1,
-                max_tokens=500,
+                max_tokens=response_token_budget,
                 stream=True
             )
 
@@ -1065,6 +1509,52 @@ if user_query and user_query.strip():
         except Exception as e:
             full_response = f"Operational Processing Error: {e}"
             stream_box.markdown(header + full_response)
+
+        # ── "chart" output format: supplement the text answer with a
+        # sentiment-breakdown bar chart built from the actual retrieved data ──
+        if output_format == "chart":
+            if periods:
+                chart_df = pd.DataFrame({
+                    label: {"Positive": len(pp), "Negative": len(pn), "Other": len(pu)}
+                    for label, pp, pn, pu in period_results
+                }).T
+            else:
+                chart_df = pd.DataFrame(
+                    {"Count": [len(positive_bullets), len(negative_bullets), len(neutral_bullets)]},
+                    index=["Positive", "Negative", "Other"]
+                )
+            st.bar_chart(chart_df)
+
+        # ── "excel"/"export" output format: offer the retrieved data points
+        # as a real downloadable .xlsx (built from the same grounded data
+        # fed to the LLM, so nothing here can be fabricated) ──
+        if output_format == "excel":
+            export_rows = []
+            if periods:
+                for label, pp, pn, pu in period_results:
+                    for b in pp:
+                        export_rows.append({"Period": label, "Sentiment": "Positive", "Feedback": b})
+                    for b in pn:
+                        export_rows.append({"Period": label, "Sentiment": "Negative", "Feedback": b})
+                    for b in pu:
+                        export_rows.append({"Period": label, "Sentiment": "Other", "Feedback": b})
+            else:
+                for b in positive_bullets:
+                    export_rows.append({"Period": timeframe_label, "Sentiment": "Positive", "Feedback": b})
+                for b in negative_bullets:
+                    export_rows.append({"Period": timeframe_label, "Sentiment": "Negative", "Feedback": b})
+                for b in neutral_bullets:
+                    export_rows.append({"Period": timeframe_label, "Sentiment": "Other", "Feedback": b})
+
+            if export_rows:
+                export_buffer = BytesIO()
+                pd.DataFrame(export_rows).to_excel(export_buffer, index=False, engine="openpyxl")
+                st.download_button(
+                    "⬇️ Download as Excel",
+                    data=export_buffer.getvalue(),
+                    file_name="vog_export.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                )
 
     final_reply = badge + "\n\n" + header + full_response
     st.session_state.chat_history.append({"role": "assistant", "content": final_reply})
