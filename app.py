@@ -9,7 +9,7 @@ import os
 
 # ── APP BUILD MARKER ── (bump this string whenever the file is regenerated,
 # so it's easy to confirm in the sidebar/logs which version is deployed)
-APP_BUILD = "2026-07-15-v5 (phrasing-independent product detection)"
+APP_BUILD = "2026-07-15-v6 (duplicate-bullet dedupe fix)"
 
 load_dotenv()
 GROQ_API_KEY = os.getenv("GROQ_API_KEY") or st.secrets.get("GROQ_API_KEY", None)
@@ -32,98 +32,7 @@ if "chat_history" not in st.session_state:
 # ==========================================
 # UI STYLING (cosmetic only — agriculture theme)
 # ==========================================
-st.markdown("""
-<style>
-.stApp {
-    background: linear-gradient(180deg, #f3f9f1 0%, #eaf4e6 100%);
-}
-section[data-testid="stSidebar"] {
-    background: linear-gradient(180deg, #1b3a24 0%, #0f2417 100%);
-}
-section[data-testid="stSidebar"] * {
-    color: #eef7ec !important;
-}
-section[data-testid="stSidebar"] input {
-    color: #111 !important;
-}
-section[data-testid="stSidebar"] button {
-    background-color: #2e7d32 !important;
-    border: 1px solid #256029 !important;
-    border-radius: 8px !important;
-}
-section[data-testid="stSidebar"] button,
-section[data-testid="stSidebar"] button p,
-section[data-testid="stSidebar"] button span,
-section[data-testid="stSidebar"] button div {
-    color: #ffffff !important;
-}
-section[data-testid="stSidebar"] button:hover {
-    background-color: #256029 !important;
-    border-color: #1b3a24 !important;
-}
-section[data-testid="stSidebar"] button:hover,
-section[data-testid="stSidebar"] button:hover p,
-section[data-testid="stSidebar"] button:hover span,
-section[data-testid="stSidebar"] button:hover div {
-    color: #ffffff !important;
-}
-.hero-title {
-    font-size: 2.15rem;
-    font-weight: 800;
-    background: linear-gradient(90deg, #2e7d32, #558b2f, #33691e);
-    -webkit-background-clip: text;
-    -webkit-text-fill-color: transparent;
-    margin-bottom: 0.1rem;
-}
-.hero-subtitle {
-    color: #4b5d4e;
-    font-size: 0.97rem;
-    margin-bottom: 1.2rem;
-}
-div[data-testid="stChatMessage"] {
-    border-radius: 16px;
-    padding: 0.7rem 1.1rem;
-    margin-bottom: 0.6rem;
-    box-shadow: 0 1px 5px rgba(46, 125, 50, 0.10);
-    background: #f2f9f2;
-    border: 1px solid #e2f0e2;
-}
-div[data-testid="stChatMessage"] ul {
-    list-style: none;
-    padding-left: 0.1rem;
-    margin-top: 0.4rem;
-}
-div[data-testid="stChatMessage"] li {
-    position: relative;
-    padding-left: 1.5rem;
-    margin-bottom: 0.45rem;
-    line-height: 1.45;
-}
-div[data-testid="stChatMessage"] li::before {
-    content: "🌱";
-    position: absolute;
-    left: 0;
-    top: 0;
-}
-.intent-badge {
-    display: inline-block;
-    padding: 0.25rem 0.75rem;
-    border-radius: 999px;
-    font-size: 0.8rem;
-    font-weight: 700;
-    margin-bottom: 0.55rem;
-}
-.badge-positive   { background: #dff5df; color: #256029; }
-.badge-complaint  { background: #fdeaea; color: #9c3b3b; }
-.badge-sentiment  { background: #e3f1e6; color: #2e5d34; }
-.badge-comparison { background: #eee3f9; color: #5b3a94; }
-.badge-product    { background: #fff3d6; color: #8a5a00; }
-div[data-testid="stChatInput"] textarea {
-    border-radius: 12px !important;
-}
-h1, .hero-title { display: flex; align-items: center; gap: 0.4rem; }
-</style>
-""", unsafe_allow_html=True)
+st.markdown(""" <style> .stApp { background: linear-gradient(180deg, #f3f9f1 0%, #eaf4e6 100%); } section[data-testid="stSidebar"] { background: linear-gradient(180deg, #1b3a24 0%, #0f2417 100%); } section[data-testid="stSidebar"] * { color: #eef7ec !important; } section[data-testid="stSidebar"] input { color: #111 !important; } section[data-testid="stSidebar"] button { background-color: #2e7d32 !important; border: 1px solid #256029 !important; border-radius: 8px !important; } section[data-testid="stSidebar"] button, section[data-testid="stSidebar"] button p, section[data-testid="stSidebar"] button span, section[data-testid="stSidebar"] button div { color: #ffffff !important; } section[data-testid="stSidebar"] button:hover { background-color: #256029 !important; border-color: #1b3a24 !important; } section[data-testid="stSidebar"] button:hover, section[data-testid="stSidebar"] button:hover p, section[data-testid="stSidebar"] button:hover span, section[data-testid="stSidebar"] button:hover div { color: #ffffff !important; } .hero-title { font-size: 2.15rem; font-weight: 800; background: linear-gradient(90deg, #2e7d32, #558b2f, #33691e); -webkit-background-clip: text; -webkit-text-fill-color: transparent; margin-bottom: 0.1rem; } .hero-subtitle { color: #4b5d4e; font-size: 0.97rem; margin-bottom: 1.2rem; } div[data-testid="stChatMessage"] { border-radius: 16px; padding: 0.7rem 1.1rem; margin-bottom: 0.6rem; box-shadow: 0 1px 5px rgba(46, 125, 50, 0.10); background: #f2f9f2; border: 1px solid #e2f0e2; } div[data-testid="stChatMessage"] ul { list-style: none; padding-left: 0.1rem; margin-top: 0.4rem; } div[data-testid="stChatMessage"] li { position: relative; padding-left: 1.5rem; margin-bottom: 0.45rem; line-height: 1.45; } div[data-testid="stChatMessage"] li::before { content: "🌱"; position: absolute; left: 0; top: 0; } .intent-badge { display: inline-block; padding: 0.25rem 0.75rem; border-radius: 999px; font-size: 0.8rem; font-weight: 700; margin-bottom: 0.55rem; } .badge-positive { background: #dff5df; color: #256029; } .badge-complaint { background: #fdeaea; color: #9c3b3b; } .badge-sentiment { background: #e3f1e6; color: #2e5d34; } .badge-comparison { background: #eee3f9; color: #5b3a94; } .badge-product { background: #fff3d6; color: #8a5a00; } div[data-testid="stChatInput"] textarea { border-radius: 12px !important; } h1, .hero-title { display: flex; align-items: center; gap: 0.4rem; } </style> """, unsafe_allow_html=True)
 
 # ==========================================
 # SIDEBAR: CREDENTIALS & CONFIG
@@ -302,9 +211,7 @@ def get_latest_year_from_index(index) -> str:
 
 
 def get_max_week_label(index, month, year) -> str | None:
-    """Find the actual latest week label (e.g. '5th Week') stored in the
-    dataset for the given month/year, so 'last week' / 'latest week' queries
-    resolve to a real week instead of a fixed guess."""
+    """Find the actual latest week label (e.g. '5th Week') stored in the dataset for the given month/year, so 'last week' / 'latest week' queries resolve to a real week instead of a fixed guess."""
     filter_conditions = {}
     if month:
         filter_conditions["month"] = {"$eq": month}
@@ -362,6 +269,14 @@ def query_pinecone_for_timeframe(index, query_vector, month, year, week, query_i
     negative_bullets = []
     neutral_bullets  = []
 
+    # Track exact text already added (case-insensitive) so the same feedback
+    # point is never sent to the model twice — this covers duplicate vectors
+    # from re-ingesting the same sheet, or the same line matching more than
+    # one week column.
+    seen_positive = set()
+    seen_negative = set()
+    seen_neutral  = set()
+
     for m in matches:
         md        = m.get("metadata", {})
         sentiment = md.get("sentiment", "neutral")
@@ -380,13 +295,20 @@ def query_pinecone_for_timeframe(index, query_vector, month, year, week, query_i
                 continue
 
         entry = f"{category}: {value}"
+        dedupe_key = entry.strip().lower()
 
         if sentiment == "positive":
-            positive_bullets.append(entry)
+            if dedupe_key not in seen_positive:
+                seen_positive.add(dedupe_key)
+                positive_bullets.append(entry)
         elif sentiment == "negative":
-            negative_bullets.append(entry)
+            if dedupe_key not in seen_negative:
+                seen_negative.add(dedupe_key)
+                negative_bullets.append(entry)
         else:
-            neutral_bullets.append(entry)
+            if dedupe_key not in seen_neutral:
+                seen_neutral.add(dedupe_key)
+                neutral_bullets.append(entry)
 
     return positive_bullets, negative_bullets, neutral_bullets
 
@@ -439,18 +361,7 @@ def detect_product_known(query_lower: str) -> str | None:
 
 
 def detect_product_dynamic(query_lower: str, index, pc) -> str | None:
-    """
-    Fallback path for products NOT in PRODUCT_LIST. Pulls candidate word(s)
-    out of the query (skipping common/sentiment/month/filler words), then
-    checks a targeted Pinecone probe — embedding the candidate itself,
-    not the user's raw question — to see if it genuinely appears inside the
-    ingested feedback text. Using a dedicated embedding per candidate (rather
-    than reusing the original query's embedding) means detection no longer
-    depends on how the question happens to be phrased: "tell me about X" and
-    "give me feedback of X" now behave identically. Multi-word product names
-    (e.g. "Naya Potash") are tried as a full phrase first, then as
-    individual words as a fallback.
-    """
+    """ Fallback path for products NOT in PRODUCT_LIST. Pulls candidate word(s) out of the query (skipping common/sentiment/month/filler words), then checks a targeted Pinecone probe — embedding the candidate itself, not the user's raw question — to see if it genuinely appears inside the ingested feedback text. Using a dedicated embedding per candidate (rather than reusing the original query's embedding) means detection no longer depends on how the question happens to be phrased: "tell me about X" and "give me feedback of X" now behave identically. Multi-word product names (e.g. "Naya Potash") are tried as a full phrase first, then as individual words as a fallback. """
     candidates = [
         w for w in re.findall(r'\b[a-zA-Z]{3,}\b', query_lower)
         if w not in PRODUCT_STOPWORDS
@@ -491,12 +402,7 @@ def filter_bullets_by_product(bullets: list[str], product: str) -> list[str]:
 
 
 def build_comparison_periods(all_months, all_years, all_weeks, index):
-    """
-    Build a list of (label, month, year, week) tuples describing each period
-    to compare. The dimension with 2+ distinct values becomes the axis of
-    comparison; other dimensions are held fixed. No explicit "compare"
-    keyword is required — mentioning two+ months/years/weeks is enough.
-    """
+    """ Build a list of (label, month, year, week) tuples describing each period to compare. The dimension with 2+ distinct values becomes the axis of comparison; other dimensions are held fixed. No explicit "compare" keyword is required — mentioning two+ months/years/weeks is enough. """
     periods = []
 
     if len(all_years) >= 2:
@@ -524,12 +430,7 @@ def build_comparison_periods(all_months, all_years, all_weeks, index):
 
 
 def build_header(query_intent, timeframe_label, active_product, periods):
-    """
-    Product and comparison context always take priority over the generic
-    'period' heading — a product query is labeled with the product name
-    (never falls back to a generic 'sentiment overview for the period'
-    heading), and a comparison query is clearly labeled as a comparison.
-    """
+    """ Product and comparison context always take priority over the generic 'period' heading — a product query is labeled with the product name (never falls back to a generic 'sentiment overview for the period' heading), and a comparison query is clearly labeled as a comparison. """
     product_label = active_product.title() if active_product else None
 
     if periods:
@@ -573,13 +474,7 @@ def build_intent_badge(query_intent, active_product, periods):
 
 
 def build_system_prompt(query_intent, timeframe_label, explicit_list_format, active_product, periods):
-    """
-    Unified prompt builder. Preserves the original prose behaviour (including
-    the two-paragraph favorable/complaints structure for the default
-    sentiment case) while adding: real markdown bullet formatting when the
-    user explicitly asks to "list" something, strict single-product focus,
-    and explicit period-by-period comparison instructions.
-    """
+    """ Unified prompt builder. Preserves the original prose behaviour (including the two-paragraph favorable/complaints structure for the default sentiment case) while adding: real markdown bullet formatting when the user explicitly asks to "list" something, strict single-product focus, and explicit period-by-period comparison instructions. """
     product_label = active_product.title() if active_product else None
 
     if active_product:
@@ -813,7 +708,7 @@ if st.session_state.authenticated:
 # ==========================================
 # PUBLIC CHAT INTERFACE
 # ==========================================
-st.markdown('<div class="hero-title">🌾 VOG CHATBOT🌱</div>', unsafe_allow_html=True)
+st.markdown('<div class="hero-title">🌾 Strategic Enterprise Performance Analyzer 🌱</div>', unsafe_allow_html=True)
 st.markdown(
     '<div class="hero-subtitle">Ask about sentiment 🌾, complaints 🐛, positive feedback 🌻, a specific '
     'product 🏷️, or compare weeks / months / years 🔀.</div>',
@@ -876,8 +771,8 @@ if user_query and user_query.strip():
         detected_week  = all_weeks[0] if all_weeks else None
 
         # ── "last / latest / most recent week" → resolve to the real latest
-        #    week label in the data (only when no explicit ordinal week like
-        #    "2nd week" was already given) ──
+        # week label in the data (only when no explicit ordinal week like
+        # "2nd week" was already given) ──
         wants_last_week = bool(re.search(r'\b(last|latest|most recent|recent)\s+week\b', query_lower))
 
         # ── Explicit "list it out" detection → bullet formatting ──
@@ -929,10 +824,10 @@ if user_query and user_query.strip():
             active_product = detect_product_dynamic(query_lower, index, pc)
 
         # ── Retrieval vector: once a product is known, search using a
-        #    product-focused embedding instead of the raw user phrasing.
-        #    This makes "tell me about Axial" behave the same as "give me
-        #    feedback of Axial" — retrieval no longer depends on how the
-        #    question happens to be worded. ──
+        # product-focused embedding instead of the raw user phrasing.
+        # This makes "tell me about Axial" behave the same as "give me
+        # feedback of Axial" — retrieval no longer depends on how the
+        # question happens to be worded. ──
         retrieval_vector = query_vector
         retrieval_top_k = 100
         if active_product:
@@ -948,7 +843,7 @@ if user_query and user_query.strip():
                 retrieval_vector = query_vector
 
         # ── Comparison auto-detection: 2+ distinct months/years/weeks
-        #    mentioned is enough — no "compare" keyword required. ──
+        # mentioned is enough — no "compare" keyword required. ──
         periods = build_comparison_periods(all_months, all_years, all_weeks, index)
 
         if periods:
@@ -998,7 +893,7 @@ if user_query and user_query.strip():
                         pass
 
             # ── Resolve "last / latest / recent week" to the real latest
-            #    week label present in the data for this month/year ──
+            # week label present in the data for this month/year ──
             if wants_last_week and not detected_week:
                 resolved_week = get_max_week_label(index, detected_month, target_year)
                 if resolved_week:
