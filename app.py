@@ -7,6 +7,10 @@ from groq import Groq
 from dotenv import load_dotenv
 import os
 
+# ── APP BUILD MARKER ── (bump this string whenever the file is regenerated,
+# so it's easy to confirm in the sidebar/logs which version is deployed)
+APP_BUILD = "2026-07-15-v5 (phrasing-independent product detection)"
+
 load_dotenv()
 GROQ_API_KEY = os.getenv("GROQ_API_KEY") or st.secrets.get("GROQ_API_KEY", None)
 PINECONE_API_KEY = os.getenv("PINECONE_API_KEY") or st.secrets.get("PINECONE_API_KEY", None)
@@ -50,6 +54,9 @@ with st.sidebar:
         if st.button("Logout"):
             st.session_state.authenticated = False
             st.rerun()
+
+    st.markdown("---")
+    st.caption(f"Build: {APP_BUILD}")
 
 # ==========================================
 # CONSTANTS & DICTIONARIES
@@ -113,7 +120,22 @@ PRODUCT_STOPWORDS = {
     "months", "year", "years", "data", "record", "records", "issue",
     "issues", "problem", "problems", "concern", "concerns", "appreciation",
     "praise", "favorable", "satisfied", "first", "second", "third",
-    "fourth", "fifth", "point", "points", "wise", "chatbot", "yield"
+    "fourth", "fifth", "point", "points", "wise", "chatbot", "yield",
+    # common connector / filler words that must never be treated as a
+    # product name during dynamic detection
+    "out", "down", "up", "into", "onto", "with", "from", "than", "then",
+    "just", "only", "also", "very", "much", "many", "more", "most", "some",
+    "such", "need", "needs", "want", "wants", "know", "get", "gets", "got",
+    "can", "could", "would", "should", "will", "shall", "may", "might",
+    "not", "no", "yes", "okay", "ok", "thanks", "thank", "you", "your",
+    "our", "their", "his", "her", "its", "all", "any", "each", "every",
+    "who", "whom", "which", "when", "where", "why", "how", "does", "did",
+    "has", "have", "had", "was", "were", "been", "being", "here", "there",
+    "these", "those", "over", "under", "again", "still", "yet", "now",
+    "provide", "write", "respond", "answer", "reply", "query", "ask",
+    "asking", "kindly", "regarding", "specific", "particular", "quick",
+    "quickly", "brief", "detail", "details", "info", "information", "one",
+    "two", "three", "four", "five", "recent", "latest", "last", "current"
 } | set(MONTH_MAP.keys())
 
 # ==========================================
@@ -323,24 +345,38 @@ def detect_product_known(query_lower: str) -> str | None:
     return None
 
 
-def detect_product_dynamic(query_lower: str, index, query_vector) -> str | None:
-    """ Fallback path for products NOT in PRODUCT_LIST. Pulls candidate words out of the query (skipping common/sentiment/month words), then checks a broad, unfiltered Pinecone probe to see if that word genuinely appears inside the ingested feedback text. This lets new products (e.g. a product added to the sheet after this app was written) work without editing PRODUCT_LIST by hand. """
+def detect_product_dynamic(query_lower: str, index, pc) -> str | None:
+    """ Fallback path for products NOT in PRODUCT_LIST. Pulls candidate word(s) out of the query (skipping common/sentiment/month/filler words), then checks a targeted Pinecone probe — embedding the candidate itself, not the user's raw question — to see if it genuinely appears inside the ingested feedback text. Using a dedicated embedding per candidate (rather than reusing the original query's embedding) means detection no longer depends on how the question happens to be phrased: "tell me about X" and "give me feedback of X" now behave identically. Multi-word product names (e.g. "Naya Potash") are tried as a full phrase first, then as individual words as a fallback. """
     candidates = [
         w for w in re.findall(r'\b[a-zA-Z]{3,}\b', query_lower)
         if w not in PRODUCT_STOPWORDS
     ]
     if not candidates:
         return None
-    try:
-        probe = index.query(vector=query_vector, top_k=50, include_metadata=True)
-        blob = " ".join(
-            str(m.get("metadata", {}).get("value", "")) for m in probe.get("matches", [])
-        ).lower()
-    except Exception:
-        return None
 
-    for cand in candidates:
-        if cand in blob:
+    # Try the full multi-word phrase first (handles "Naya Potash"-style names),
+    # then fall back to individual candidate words.
+    ordered_candidates = []
+    if len(candidates) >= 2:
+        ordered_candidates.append(" ".join(candidates))
+    ordered_candidates.extend(candidates)
+
+    for cand in ordered_candidates:
+        try:
+            probe_embed = pc.inference.embed(
+                model="llama-text-embed-v2",
+                inputs=[f"{cand} product feedback sentiment"],
+                parameters={"input_type": "query", "dimension": EMBEDDING_DIMENSION}
+            )
+            probe_vector = probe_embed[0].values
+            probe = index.query(vector=probe_vector, top_k=50, include_metadata=True)
+            blob = " ".join(
+                str(m.get("metadata", {}).get("value", "")) for m in probe.get("matches", [])
+            ).lower()
+        except Exception:
+            continue
+
+        if cand.lower() in blob:
             return cand
     return None
 
@@ -770,7 +806,7 @@ if user_query and user_query.strip():
         # ── Product detection: curated list first, dynamic probe fallback ──
         active_product = detect_product_known(query_lower)
         if not active_product:
-            active_product = detect_product_dynamic(query_lower, index, query_vector)
+            active_product = detect_product_dynamic(query_lower, index, pc)
 
         # ── Retrieval vector: once a product is known, search using a
         # product-focused embedding instead of the raw user phrasing.
@@ -860,9 +896,15 @@ if user_query and user_query.strip():
 
             total_found = len(positive_bullets) + len(negative_bullets) + len(neutral_bullets)
 
-            timeframe_label = " ".join(
-                filter(None, [detected_week, detected_month, target_year])
-            ) or "the requested period"
+            timeframe_parts = []
+            if detected_week:
+                week_part = detected_week if "week" in detected_week.lower() else f"{detected_week} Week"
+                timeframe_parts.append(week_part)
+            if detected_month:
+                timeframe_parts.append(f"of {detected_month}" if detected_week else detected_month)
+            if target_year:
+                timeframe_parts.append(target_year)
+            timeframe_label = " ".join(timeframe_parts) or "the requested period"
 
     # ── Info banners for the single-period flow only ──
     if not periods:
