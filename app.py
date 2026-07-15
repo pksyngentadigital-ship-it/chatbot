@@ -182,8 +182,10 @@ PRODUCT_STOPWORDS = {
     "provide", "write", "respond", "answer", "reply", "query", "ask",
     "asking", "kindly", "regarding", "specific", "particular", "quick",
     "quickly", "brief", "detail", "details", "info", "information", "one",
-    "two", "three", "four", "five", "recent", "latest", "last", "current"
-} | set(MONTH_MAP.keys())
+    "two", "three", "four", "five", "recent", "latest", "last", "current",
+    "previous", "next", "prior", "season", "seasons", "compared", "across",
+    "during", "within", "improved"
+} | set(MONTH_MAP.keys()) | set(BUSINESS_KEYWORDS)
 
 # ==========================================
 # UTILITIES
