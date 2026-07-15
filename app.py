@@ -813,7 +813,7 @@ if st.session_state.authenticated:
 # ==========================================
 # PUBLIC CHAT INTERFACE
 # ==========================================
-st.markdown('<div class="hero-title">🌾 Strategic Enterprise Performance Analyzer 🌱</div>', unsafe_allow_html=True)
+st.markdown('<div class="hero-title">🌾 VOG CHATBOT🌱</div>', unsafe_allow_html=True)
 st.markdown(
     '<div class="hero-subtitle">Ask about sentiment 🌾, complaints 🐛, positive feedback 🌻, a specific '
     'product 🏷️, or compare weeks / months / years 🔀.</div>',
