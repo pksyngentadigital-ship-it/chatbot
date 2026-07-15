@@ -572,8 +572,8 @@ def detect_aggregation_request(query_lower: str) -> str | None:
     return None
 
 
-def fetch_matches_for_aggregation(index, filter_conditions, top_k=1000):
-    """Broad, non-semantic fetch (dummy vector) used purely for exact counting/ranking over metadata tags."""
+def fetch_matches_for_aggregation(index, filter_conditions, top_k=10000):
+    """ Broad, non-semantic fetch (dummy vector) used purely for exact counting/ranking over metadata tags. top_k is set high (Pinecone's practical ceiling) because a zero vector carries no similarity signal — Pinecone returns matches in whatever internal order it likes, so a small top_k risks silently missing the tagged subset (e.g. only a minority of complaint records mention a specific crop by name) rather than giving a true representative sample. """
     dummy_vector = [0.0] * EMBEDDING_DIMENSION
     results = index.query(
         vector=dummy_vector, top_k=top_k, include_metadata=True,
@@ -612,7 +612,9 @@ def detect_output_format(query_lower: str) -> str | None:
 
 
 def build_subject_label(active_product, active_crop):
-    """Combine crop + product into one display label, e.g. 'Wheat + Isabion'."""
+    """Combine crop + product into one display label, e.g. 'Wheat + Isabion'. Collapses to one when both detections landed on the same word (e.g. dynamic product-probe fallback re-matching the crop name)."""
+    if active_crop and active_product and active_crop.lower() == active_product.lower():
+        return active_crop.title()
     parts = []
     if active_crop:
         parts.append(active_crop.title())
@@ -1202,6 +1204,8 @@ if user_query and user_query.strip():
         if not active_product:
             active_product = detect_product_dynamic(query_lower, index, pc)
         active_crop = detect_crop(query_lower)
+        if active_product and active_crop and active_product.lower() == active_crop.lower():
+            active_product = None
 
         # ── Retrieval vector: once a product/crop is known, search using a
         # focused embedding instead of the raw user phrasing. This makes
@@ -1240,7 +1244,7 @@ if user_query and user_query.strip():
             elif category_filter:
                 agg_filter["category"] = {"$eq": category_filter}
 
-            agg_matches = fetch_matches_for_aggregation(index, agg_filter, top_k=1000)
+            agg_matches = fetch_matches_for_aggregation(index, agg_filter)
             field = "crop" if aggregation_dimension == "crop" else "products"
             ranking = rank_by_field(agg_matches, field, top_n=10)
 
