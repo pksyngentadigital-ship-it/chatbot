@@ -10,7 +10,7 @@ import os
 
 # ── APP BUILD MARKER ── (bump this string whenever the file is regenerated,
 # so it's easy to confirm in the sidebar/logs which version is deployed)
-APP_BUILD = "2026-07-15-v8 (VoG capability expansion: layout-aware ingestion, crop/product ranking, suggestions, output formats)"
+APP_BUILD = "2026-07-15-v9 (adds categorized suggested-prompts panel)"
 
 load_dotenv()
 GROQ_API_KEY = os.getenv("GROQ_API_KEY") or st.secrets.get("GROQ_API_KEY", None)
@@ -1062,11 +1062,75 @@ st.markdown(
     unsafe_allow_html=True
 )
 
+# ==========================================
+# SUGGESTED PROMPTS (guide the user on what they can ask)
+# ==========================================
+SUGGESTED_PROMPTS = {
+    "📊 Executive": [
+        "What are the top 10 grower concerns reported during the last 30 days?",
+        "Summarize the major grower insights for the last quarter in one page.",
+        "What are the emerging trends compared to the previous year?",
+    ],
+    "🌾 Crop-wise": [
+        "What are the top issues reported in rice during 2026?",
+        "Compare grower feedback for wheat between 2025 and 2026.",
+        "Show the sentiment analysis for cotton growers.",
+    ],
+    "🏷️ Product-wise": [
+        "Which Syngenta products received the highest positive feedback?",
+        "List the products with the highest complaint frequency.",
+        "Compare customer sentiment for Tilt and Isabion.",
+    ],
+    "🐛 Complaints": [
+        "What are the top five complaints received in the last six months?",
+        "Identify the root causes of the most common complaints.",
+        "Show the monthly complaint trend for the past three years.",
+    ],
+    "🌻 Sentiment": [
+        "Show overall grower sentiment by month.",
+        "Compare positive, neutral, and negative sentiment across crops.",
+        "Display sentiment trends in chart and table format.",
+    ],
+    "💡 Suggestions": [
+        "What suggestions have growers provided for rice cultivation?",
+        "What are the most common product improvement recommendations?",
+        "Summarize grower expectations from Syngenta.",
+    ],
+    "💰 Sales": [
+        "Which products receive the highest number of price inquiries?",
+        "Which crops generate the highest sales-related questions?",
+    ],
+    "📣 Marketing & Digital": [
+        "What misconceptions do growers commonly have about our products?",
+        "What are the most common complaints regarding digital platforms or systems?",
+    ],
+    "🔮 Advanced & Rankings": [
+        "Which crop generated the highest number of complaints?",
+        "Generate the Top 10 business insights from the last three years.",
+        "Based on all historical data, recommend the top five strategic actions Syngenta should prioritize for the next season.",
+    ],
+    "📄 Output formats": [
+        "Show grower suggestions for rice in a table.",
+        "Generate an executive summary of complaints for 2026.",
+        "Create a PowerPoint-ready summary of positive feedback for Isabion.",
+    ],
+}
+
+with st.expander("💡 Not sure what to ask? Try one of these", expanded=(len(st.session_state.chat_history) == 0)):
+    tabs = st.tabs(list(SUGGESTED_PROMPTS.keys()))
+    for tab, (category, prompts) in zip(tabs, SUGGESTED_PROMPTS.items()):
+        with tab:
+            for i, prompt in enumerate(prompts):
+                if st.button(prompt, key=f"suggest_{category}_{i}", use_container_width=True):
+                    st.session_state.pending_query = prompt
+                    st.rerun()
+
 for message in st.session_state.chat_history:
     with st.chat_message(message["role"]):
         st.markdown(message["content"], unsafe_allow_html=True)
 
-user_query = st.chat_input("Ask about sentiment, a product, or compare periods...")
+typed_query = st.chat_input("Ask about sentiment, a product, or compare periods...")
+user_query = typed_query or st.session_state.pop("pending_query", None)
 
 if user_query and user_query.strip():
     with st.chat_message("user"):
