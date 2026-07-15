@@ -9,7 +9,7 @@ import os
 
 # ── APP BUILD MARKER ── (bump this string whenever the file is regenerated,
 # so it's easy to confirm in the sidebar/logs which version is deployed)
-APP_BUILD = "2026-07-15-v6 (duplicate-bullet dedupe fix)"
+APP_BUILD = "2026-07-15-v7 (anti-hallucination grounding fix)"
 
 load_dotenv()
 GROQ_API_KEY = os.getenv("GROQ_API_KEY") or st.secrets.get("GROQ_API_KEY", None)
@@ -560,6 +560,16 @@ def build_system_prompt(query_intent, timeframe_label, explicit_list_format, act
 
     system_prompt = (
         "You are a smart, friendly chatbot analyst for Syngenta, an agriculture company. "
+        "STRICT GROUNDING RULE — READ CAREFULLY: You must use ONLY the information given "
+        "to you in the 'Data Context' block in the user's message. You have general "
+        "knowledge about real Syngenta/agriculture products from your training — you must "
+        "IGNORE all of that here. Do NOT invent, assume, guess, or add any product name, "
+        "complaint, statistic, or feedback point that is not explicitly written in the Data "
+        "Context, even if it sounds plausible or matches a real product you know about. If "
+        "the Data Context contains only one point, your entire response must be based on "
+        "that single point only — never pad the list with extra products or details to make "
+        "it look longer or more complete. If the Data Context is empty or has nothing "
+        "relevant, say so plainly instead of making something up. "
         f"Cover ONLY {intent_label} from the data context provided. "
         f"{product_clause}"
         f"{comparison_clause}"
@@ -567,7 +577,10 @@ def build_system_prompt(query_intent, timeframe_label, explicit_list_format, act
         f"{structure_clause}"
         f"Start your response with a short, clear opening line ({opening_hint}), then "
         "continue. Write so a busy reader understands the key takeaway at first glance. "
-        "Do not include bracketed dates, week labels, or raw metadata tags in the output."
+        "Do not include bracketed dates, week labels, or raw metadata tags in the output. "
+        "REMINDER: every product name and every point in your response must come directly "
+        "from the Data Context above — never introduce a product or detail that isn't "
+        "explicitly there."
     )
     return system_prompt
 
@@ -967,6 +980,7 @@ if user_query and user_query.strip():
     if periods:
         # Build labeled context blocks, one per compared period
         context_parts = []
+        actual_point_count = 0
         for label, pos, neg, neut in period_results:
             section_lines = [f"=== {label} ==="]
             if query_intent == "complaint":
@@ -980,6 +994,7 @@ if user_query and user_query.strip():
                 section_lines.append("NEGATIVE DATA:\n" + "\n".join(neg))
             if neut:
                 section_lines.append("OTHER DATA:\n" + "\n".join(neut))
+            actual_point_count += len(pos) + len(neg) + len(neut)
             context_parts.append("\n".join(section_lines))
         combined_context = "\n\n".join(context_parts)
 
@@ -997,6 +1012,8 @@ if user_query and user_query.strip():
             negative_bullets = negative_bullets[:MAX_BULLETS]
             neutral_bullets  = neutral_bullets[:MAX_BULLETS]
 
+        actual_point_count = len(positive_bullets) + len(negative_bullets) + len(neutral_bullets)
+
         context_parts = []
         if positive_bullets:
             context_parts.append("POSITIVE DATA:\n" + "\n".join(positive_bullets))
@@ -1013,7 +1030,8 @@ if user_query and user_query.strip():
 
     user_prompt = (
         f"Timeframe: {timeframe_label}\n\n"
-        f"Data Context:\n{combined_context}\n\n"
+        f"Data Context ({actual_point_count} distinct data point{'s' if actual_point_count != 1 else ''} total — "
+        f"do not exceed this number):\n{combined_context}\n\n"
         f"User Query: {user_query}"
     )
 
