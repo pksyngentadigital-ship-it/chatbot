@@ -5,3 +5,4 @@ pinecone
 requests
 groq
 python-dotenv
+python-pptx

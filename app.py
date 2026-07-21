@@ -6,11 +6,15 @@ from collections import Counter
 from pinecone import Pinecone
 from groq import Groq
 from dotenv import load_dotenv
+from pptx import Presentation
+from pptx.util import Inches, Pt
+from pptx.chart.data import CategoryChartData
+from pptx.enum.chart import XL_CHART_TYPE
 import os
 
 # ── APP BUILD MARKER ── (bump this string whenever the file is regenerated,
 # so it's easy to confirm in the sidebar/logs which version is deployed)
-APP_BUILD = "2026-07-15-v9 (adds categorized suggested-prompts panel)"
+APP_BUILD = "2026-07-15-v10 (PPTX export, always-on downloads, monthly trend analysis, product/disease fix)"
 
 load_dotenv()
 GROQ_API_KEY = os.getenv("GROQ_API_KEY") or st.secrets.get("GROQ_API_KEY", None)
@@ -82,6 +86,12 @@ MONTH_MAP = {
     "nov": "November",    "dec": "December"
 }
 
+MONTH_ORDER = {
+    "January": 1, "February": 2, "March": 3, "April": 4, "May": 5, "June": 6,
+    "July": 7, "August": 8, "September": 9, "October": 10, "November": 11,
+    "December": 12
+}
+
 CATEGORY_NORMALIZE = {
     "product queries":              "Product Queries",
     "problem/advisory":             "Problem/Advisory",
@@ -132,6 +142,26 @@ CROP_LIST = [
     "carrot", "radish", "spinach", "cumin", "coriander", "fenugreek"
 ]
 
+# Diseases, pests, and agronomic problems that must NEVER be reported back to
+# the user as if they were products — the raw feedback text often names them
+# in the same sentence as real products (e.g. "Septoria control with Score"),
+# and the capitalized-phrase heuristic in extract_product_mentions would
+# otherwise tag them as brand names.
+DISEASE_PEST_TERMS = [
+    "septoria", "blast", "blight", "rust", "wilt", "rot", "mildew",
+    "powdery mildew", "downy mildew", "virus", "mosaic", "mosaic virus",
+    "aphid", "aphids", "borer", "borers", "caterpillar", "caterpillars",
+    "armyworm", "armyworms", "fall armyworm", "faw", "termite", "termites",
+    "rodent", "rodents", "whitefly", "whiteflies", "thrips", "mite", "mites",
+    "nematode", "nematodes", "weed", "weeds", "fungus", "fungal", "bacterial",
+    "bacteria", "larvae", "larva", "infestation", "infestations", "scab",
+    "canker", "leaf spot", "leaf curl", "yellowing", "stunting", "wilting",
+    "disease", "diseases", "pest", "pests"
+]
+# Flattened to individual words so multi-word phrases (e.g. "Leaf Curl Virus")
+# are still caught even though only part of the phrase matches a listed term.
+DISEASE_PEST_WORDS = {w for term in DISEASE_PEST_TERMS for w in term.split()}
+
 # Extra business-domain vocabulary the strict topic guardrail must recognize
 # (executive/sales/marketing/digital/advanced-analytics use cases, plus the
 # various output-format requests such as tables, charts, and exports).
@@ -151,7 +181,8 @@ BUSINESS_KEYWORDS = [
     "common", "pattern", "patterns", "hidden", "platform", "platforms",
     "online", "support", "experience", "customer", "recommended", "most",
     "highest", "significant", "significantly", "increased", "improve",
-    "business", "monthly", "yearly", "annual", "annually", "breakdown"
+    "business", "monthly", "yearly", "annual", "annually", "breakdown",
+    "revenue", "growth", "performance", "analytics", "kpi", "kpis"
 ]
 
 # Generic words that should never be mistaken for a product name during
@@ -185,7 +216,7 @@ PRODUCT_STOPWORDS = {
     "two", "three", "four", "five", "recent", "latest", "last", "current",
     "previous", "next", "prior", "season", "seasons", "compared", "across",
     "during", "within", "improved"
-} | set(MONTH_MAP.keys()) | set(BUSINESS_KEYWORDS)
+} | set(MONTH_MAP.keys()) | set(BUSINESS_KEYWORDS) | set(DISEASE_PEST_TERMS)
 
 # ==========================================
 # UTILITIES
@@ -517,6 +548,8 @@ def extract_product_mentions(text: str) -> list[str]:
         words = cand.split()
         if all(w.lower() in PRODUCT_STOPWORDS or w.lower() in MONTH_MAP for w in words):
             continue
+        if any(w.lower() in DISEASE_PEST_WORDS for w in words):
+            continue
         if cand.strip().lower() in ("syngenta",):
             continue
         key = cand.strip().lower()
@@ -613,6 +646,153 @@ def detect_output_format(query_lower: str) -> str | None:
     return None
 
 
+def detect_trend_request(query_lower: str) -> bool:
+    """ Detects requests for a monthly trend / growth-over-time breakdown (as opposed to a single-period or comparison-of-two-periods question). Deliberately conservative — bare words like "sales" or "products" alone are far too common in ordinary questions to trigger a full trend workup, so this requires an explicit temporal/trend framing. """
+    trend_phrases = [
+        'trend', 'trends', 'trending', 'month over month', 'month-over-month',
+        'monthly trend', 'over time', 'growth', 'analytics over time',
+        'performance over', 'monthly totals', 'monthly breakdown'
+    ]
+    return any(p in query_lower for p in trend_phrases)
+
+
+def compute_monthly_trend(matches):
+    """ Group raw Pinecone matches by (year, month) and return a chronologically sorted list of (label, count) tuples, e.g. [("January 2026", 42), ("February 2026", 51), ...]. Purely deterministic counting — no LLM involved, so the numbers are always exactly what's in the data. """
+    counts = Counter()
+    for m in matches:
+        md = m.get("metadata", {})
+        month = md.get("month")
+        year = md.get("year")
+        if not month or not year or month not in MONTH_ORDER:
+            continue
+        counts[(year, month)] += 1
+
+    ordered_keys = sorted(counts.keys(), key=lambda k: (int(k[0]), MONTH_ORDER[k[1]]))
+    return [(f"{month} {year}", counts[(year, month)]) for year, month in ordered_keys]
+
+
+def compute_growth_series(monthly_counts):
+    """ Given [(label, count), ...] in chronological order, return a parallel list of month-over-month growth percentages (None for the first period, which has no prior month to compare against). """
+    growth = [None]
+    for i in range(1, len(monthly_counts)):
+        prev_count = monthly_counts[i - 1][1]
+        curr_count = monthly_counts[i][1]
+        if prev_count == 0:
+            growth.append(None)
+        else:
+            growth.append(round((curr_count - prev_count) / prev_count * 100, 1))
+    return growth
+
+
+def build_pptx_report(title, subtitle, exec_summary_lines, kpis, chart_title, chart_labels, chart_values,
+                       chart_type="column", table_headers=None, table_rows=None,
+                       insights=None, recommendations=None):
+    """ Build a professional PPTX deck: Title -> Executive Summary -> Key KPIs -> Chart -> Table -> Key Insights & Recommendations. Uses PowerPoint's native chart/table shapes (not an embedded image) so the deck stays fully editable in PowerPoint. Returns raw bytes ready for st.download_button. """
+    prs = Presentation()
+    prs.slide_width = Inches(13.333)
+    prs.slide_height = Inches(7.5)
+    title_layout = prs.slide_layouts[0]
+    bullet_layout = prs.slide_layouts[1]
+    blank_layout = prs.slide_layouts[6]
+
+    # ── Slide 1: Title ──
+    slide = prs.slides.add_slide(title_layout)
+    slide.shapes.title.text = title
+    if len(slide.placeholders) > 1:
+        slide.placeholders[1].text = subtitle
+
+    # ── Slide 2: Executive Summary ──
+    slide = prs.slides.add_slide(bullet_layout)
+    slide.shapes.title.text = "Executive Summary"
+    tf = slide.placeholders[1].text_frame
+    tf.clear()
+    lines = exec_summary_lines or ["No summary available."]
+    for i, line in enumerate(lines):
+        p = tf.paragraphs[0] if i == 0 else tf.add_paragraph()
+        p.text = line
+        p.font.size = Pt(18)
+
+    # ── Slide 3: Key KPIs ──
+    slide = prs.slides.add_slide(bullet_layout)
+    slide.shapes.title.text = "Key KPIs"
+    tf = slide.placeholders[1].text_frame
+    tf.clear()
+    kpi_items = list((kpis or {}).items()) or [("No KPIs available", "")]
+    for i, (k, v) in enumerate(kpi_items):
+        p = tf.paragraphs[0] if i == 0 else tf.add_paragraph()
+        p.text = f"{k}: {v}"
+        p.font.size = Pt(20)
+        p.font.bold = True
+
+    # ── Slide 4: Chart ──
+    if chart_labels and chart_values:
+        slide = prs.slides.add_slide(blank_layout)
+        title_box = slide.shapes.add_textbox(Inches(0.5), Inches(0.2), Inches(12), Inches(0.6))
+        title_box.text_frame.text = chart_title
+        title_box.text_frame.paragraphs[0].font.size = Pt(24)
+        title_box.text_frame.paragraphs[0].font.bold = True
+
+        chart_data = CategoryChartData()
+        chart_data.categories = chart_labels
+        chart_data.add_series(chart_title, chart_values)
+        xl_type = XL_CHART_TYPE.LINE_MARKERS if chart_type == "line" else XL_CHART_TYPE.COLUMN_CLUSTERED
+        slide.shapes.add_chart(xl_type, Inches(0.75), Inches(1.0), Inches(11.8), Inches(6.0), chart_data)
+
+    # ── Slide 5: Table ──
+    if table_headers and table_rows:
+        slide = prs.slides.add_slide(blank_layout)
+        title_box = slide.shapes.add_textbox(Inches(0.5), Inches(0.2), Inches(12), Inches(0.6))
+        title_box.text_frame.text = "Supporting Data"
+        title_box.text_frame.paragraphs[0].font.size = Pt(24)
+        title_box.text_frame.paragraphs[0].font.bold = True
+
+        MAX_ROWS = 15
+        rows_to_show = table_rows[:MAX_ROWS]
+        n_rows = len(rows_to_show) + 1
+        n_cols = len(table_headers)
+        table_shape = slide.shapes.add_table(n_rows, n_cols, Inches(0.5), Inches(1.0), Inches(12.3), Inches(6.0))
+        table = table_shape.table
+        for c, header in enumerate(table_headers):
+            table.cell(0, c).text = str(header)
+        for r, row in enumerate(rows_to_show, start=1):
+            for c, val in enumerate(row):
+                cell_text = str(val)
+                table.cell(r, c).text = cell_text[:300]
+
+    # ── Slide 6: Key Insights & Recommendations ──
+    if insights or recommendations:
+        slide = prs.slides.add_slide(bullet_layout)
+        slide.shapes.title.text = "Key Insights & Recommendations"
+        tf = slide.placeholders[1].text_frame
+        tf.clear()
+        first = True
+        for point in (insights or []):
+            p = tf.paragraphs[0] if first else tf.add_paragraph()
+            first = False
+            p.text = f"Insight: {point}"
+            p.font.size = Pt(16)
+        for point in (recommendations or []):
+            p = tf.paragraphs[0] if first else tf.add_paragraph()
+            first = False
+            p.text = f"Recommendation: {point}"
+            p.font.size = Pt(16)
+            p.font.bold = True
+
+    buf = BytesIO()
+    prs.save(buf)
+    return buf.getvalue()
+
+
+def split_into_points(text: str, max_points: int = 6) -> list[str]:
+    """Break an LLM prose/bullet response into short standalone points for slide bullets."""
+    lines = [l.strip(" -*").strip() for l in text.split("\n") if l.strip(" -*").strip()]
+    if len(lines) >= 2:
+        return lines[:max_points]
+    # Fall back to sentence-splitting for single-paragraph prose responses.
+    sentences = re.split(r'(?<=[.!?])\s+', text.strip())
+    return [s.strip() for s in sentences if s.strip()][:max_points]
+
+
 def build_subject_label(active_product, active_crop):
     """Combine crop + product into one display label, e.g. 'Wheat + Isabion'. Collapses to one when both detections landed on the same word (e.g. dynamic product-probe fallback re-matching the crop name)."""
     if active_crop and active_product and active_crop.lower() == active_product.lower():
@@ -678,7 +858,7 @@ def build_intent_badge(query_intent, active_product, periods, active_crop=None):
     return '<span class="intent-badge badge-sentiment">🌾 Sentiment Overview</span>'
 
 
-def build_system_prompt(query_intent, timeframe_label, explicit_list_format, active_product, periods, active_crop=None, output_format=None):
+def build_system_prompt(query_intent, timeframe_label, explicit_list_format, active_product, periods, active_crop=None, output_format=None, wants_products_only=False):
     """ Unified prompt builder. Preserves the original prose behaviour (including the two-paragraph favorable/complaints structure for the default sentiment case) while adding: real markdown bullet formatting when the user explicitly asks to "list" something, strict single-product/crop focus, explicit period-by-period comparison instructions, and output-format overrides (table / executive summary / PPT outline). """
     product_label = active_product.title() if active_product else None
     crop_label = active_crop.title() if active_crop else None
@@ -823,7 +1003,17 @@ def build_system_prompt(query_intent, timeframe_label, explicit_list_format, act
         "relevant, say so plainly instead of making something up. "
         f"Cover ONLY {intent_label} from the data context provided. "
         f"{product_clause}"
-        f"{comparison_clause}"
+        + (
+            "The user is asking specifically about PRODUCTS. Only name real "
+            "Syngenta product/brand names (e.g. Isabion, Axial, Quantis, "
+            "Cropwise). Do NOT list crop diseases, pests, weeds, or agronomic "
+            "problems (e.g. Septoria, Blast, Armyworm, termites, weeds, "
+            "yellowing) as if they were products — mention a disease/pest "
+            "only in passing if it explains why a product was used, never as "
+            "an item in a products list.\n"
+            if wants_products_only else ""
+        )
+        + f"{comparison_clause}"
         f"{format_clause}"
         f"{structure_clause}"
         f"Start your response with a short, clear opening line ({opening_hint}), then "
@@ -1194,6 +1384,13 @@ if user_query and user_query.strip():
         # ── Output format the user explicitly asked for (table / exec summary / PPT / chart / excel) ──
         output_format = detect_output_format(query_lower)
 
+        # ── User is asking about products specifically → keep diseases/pests
+        # (which often appear in the same feedback sentence) out of the answer ──
+        wants_products_only = bool(re.search(r'\bproducts?\b', query_lower))
+
+        # ── Monthly trend / growth / performance-over-time request ──
+        wants_trend = detect_trend_request(query_lower)
+
         # ── Deterministic ranking request ("which crop/product generated the highest...") ──
         aggregation_dimension = detect_aggregation_request(query_lower)
 
@@ -1347,6 +1544,120 @@ if user_query and user_query.strip():
                         {aggregation_dimension.title(): [n for n, _ in ranking], "Mentions": [c for _, c in ranking]}
                     ).set_index(aggregation_dimension.title())
                     st.bar_chart(chart_df)
+
+                    dl_col1, dl_col2, dl_col3 = st.columns(3)
+                    with dl_col1:
+                        csv_bytes = pd.DataFrame(ranking, columns=[aggregation_dimension.title(), "Mentions"]).to_csv(index=False).encode("utf-8")
+                        st.download_button("⬇️ Chart data (CSV)", data=csv_bytes, file_name="ranking_chart.csv", mime="text/csv", key="ranking_csv")
+                    with dl_col2:
+                        excel_buf = BytesIO()
+                        pd.DataFrame(ranking, columns=[aggregation_dimension.title(), "Mentions"]).to_excel(excel_buf, index=False, engine="openpyxl")
+                        st.download_button("⬇️ Excel", data=excel_buf.getvalue(), file_name="ranking.xlsx",
+                                           mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", key="ranking_excel")
+                    with dl_col3:
+                        pptx_bytes = build_pptx_report(
+                            title=f"{aggregation_dimension.title()}-wise Ranking",
+                            subtitle=scope_label,
+                            exec_summary_lines=[f"Based on {len(agg_matches)} matched records, {top_name} ranks highest with {top_count} mentions."],
+                            kpis={"Total matched records": len(agg_matches), "Top " + aggregation_dimension: top_name, "Top mentions": top_count},
+                            chart_title=f"{aggregation_dimension.title()} Mentions", chart_labels=[n for n, _ in ranking],
+                            chart_values=[c for _, c in ranking], chart_type="column",
+                            table_headers=["Rank", aggregation_dimension.title(), "Mentions"],
+                            table_rows=[(i, n, c) for i, (n, c) in enumerate(ranking, start=1)],
+                            insights=[f"{n} — {c} mentions" for n, c in ranking[:5]],
+                        )
+                        st.download_button("⬇️ PowerPoint", data=pptx_bytes, file_name="ranking.pptx",
+                                           mime="application/vnd.openxmlformats-officedocument.presentationml.presentation", key="ranking_pptx")
+            st.session_state.chat_history.append({"role": "assistant", "content": reply})
+            st.stop()
+
+        # ── Monthly trend / growth analysis path (deterministic, no LLM
+        # math) — triggered by explicit trend/growth/"over time" phrasing. ──
+        if wants_trend:
+            trend_filter = {}
+            if query_intent == "positive":
+                trend_filter["sentiment"] = {"$eq": "positive"}
+            elif query_intent == "complaint":
+                trend_filter["sentiment"] = {"$eq": "negative"}
+            elif category_filter:
+                trend_filter["category"] = {"$eq": category_filter}
+
+            trend_matches = fetch_matches_for_aggregation(index, trend_filter)
+            if active_crop:
+                trend_matches = [m for m in trend_matches if active_crop.lower() in str(m.get("metadata", {}).get("value", "")).lower()]
+            if active_product:
+                trend_matches = [m for m in trend_matches if active_product.lower() in str(m.get("metadata", {}).get("value", "")).lower()]
+
+            monthly_counts = compute_monthly_trend(trend_matches)
+            growth_series = compute_growth_series(monthly_counts)
+
+            subject_label_trend = build_subject_label(active_product, active_crop)
+            subject_bit = f" for {subject_label_trend}" if subject_label_trend else ""
+            badge = '<span class="intent-badge badge-ranking">📈 Monthly Trend</span>'
+            header = f"📈 Monthly Trend Analysis{subject_bit}:\n\n"
+
+            if not monthly_counts:
+                reply = f"{badge}\n\n{header}No dated records were found{subject_bit} to build a monthly trend from."
+                with st.chat_message("assistant"):
+                    st.markdown(reply, unsafe_allow_html=True)
+                st.session_state.chat_history.append({"role": "assistant", "content": reply})
+                st.stop()
+
+            highest = max(monthly_counts, key=lambda x: x[1])
+            lowest = min(monthly_counts, key=lambda x: x[1])
+            table_lines = ["| Month | Count | MoM Growth |", "|---|---|---|"]
+            for (label, count), growth in zip(monthly_counts, growth_series):
+                growth_str = "—" if growth is None else f"{'+' if growth >= 0 else ''}{growth}%"
+                table_lines.append(f"| {label} | {count} | {growth_str} |")
+
+            reply = (
+                f"{badge}\n\n{header}"
+                f"Highest month: **{highest[0]}** ({highest[1]} records). "
+                f"Lowest month: **{lowest[0]}** ({lowest[1]} records).\n\n"
+                + "\n".join(table_lines)
+            )
+
+            with st.chat_message("assistant"):
+                st.markdown(reply, unsafe_allow_html=True)
+                trend_chart_df = pd.DataFrame(
+                    {"Count": [c for _, c in monthly_counts]}, index=[label for label, _ in monthly_counts]
+                )
+                st.line_chart(trend_chart_df)
+
+                dl_col1, dl_col2, dl_col3 = st.columns(3)
+                with dl_col1:
+                    csv_bytes = pd.DataFrame(
+                        {"Month": [l for l, _ in monthly_counts], "Count": [c for _, c in monthly_counts],
+                         "MoM Growth %": growth_series}
+                    ).to_csv(index=False).encode("utf-8")
+                    st.download_button("⬇️ Chart data (CSV)", data=csv_bytes, file_name="monthly_trend.csv", mime="text/csv", key="trend_csv")
+                with dl_col2:
+                    excel_buf = BytesIO()
+                    pd.DataFrame(
+                        {"Month": [l for l, _ in monthly_counts], "Count": [c for _, c in monthly_counts],
+                         "MoM Growth %": growth_series}
+                    ).to_excel(excel_buf, index=False, engine="openpyxl")
+                    st.download_button("⬇️ Excel", data=excel_buf.getvalue(), file_name="monthly_trend.xlsx",
+                                       mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", key="trend_excel")
+                with dl_col3:
+                    pptx_bytes = build_pptx_report(
+                        title=f"Monthly Trend Analysis{subject_bit}",
+                        subtitle=f"{monthly_counts[0][0]} – {monthly_counts[-1][0]}",
+                        exec_summary_lines=[
+                            f"Highest month: {highest[0]} with {highest[1]} records.",
+                            f"Lowest month: {lowest[0]} with {lowest[1]} records.",
+                        ],
+                        kpis={"Total records": sum(c for _, c in monthly_counts), "Highest month": f"{highest[0]} ({highest[1]})",
+                              "Lowest month": f"{lowest[0]} ({lowest[1]})"},
+                        chart_title="Monthly Trend", chart_labels=[l for l, _ in monthly_counts],
+                        chart_values=[c for _, c in monthly_counts], chart_type="line",
+                        table_headers=["Month", "Count", "MoM Growth %"],
+                        table_rows=[(l, c, ("—" if g is None else f"{g}%")) for (l, c), g in zip(monthly_counts, growth_series)],
+                        insights=[f"{highest[0]} was the strongest month ({highest[1]} records).",
+                                  f"{lowest[0]} was the weakest month ({lowest[1]} records)."],
+                    )
+                    st.download_button("⬇️ PowerPoint", data=pptx_bytes, file_name="monthly_trend.pptx",
+                                       mime="application/vnd.openxmlformats-officedocument.presentationml.presentation", key="trend_pptx")
             st.session_state.chat_history.append({"role": "assistant", "content": reply})
             st.stop()
 
@@ -1537,7 +1848,7 @@ if user_query and user_query.strip():
 
     system_prompt = build_system_prompt(
         query_intent, timeframe_label, explicit_list_format, active_product, periods,
-        active_crop=active_crop, output_format=output_format
+        active_crop=active_crop, output_format=output_format, wants_products_only=wants_products_only
     )
 
     user_prompt = (
@@ -1580,51 +1891,94 @@ if user_query and user_query.strip():
             full_response = f"Operational Processing Error: {e}"
             stream_box.markdown(header + full_response)
 
-        # ── "chart" output format: supplement the text answer with a
-        # sentiment-breakdown bar chart built from the actual retrieved data ──
-        if output_format == "chart":
-            if periods:
-                chart_df = pd.DataFrame({
-                    label: {"Positive": len(pp), "Negative": len(pn), "Other": len(pu)}
-                    for label, pp, pn, pu in period_results
-                }).T
-            else:
-                chart_df = pd.DataFrame(
-                    {"Count": [len(positive_bullets), len(negative_bullets), len(neutral_bullets)]},
-                    index=["Positive", "Negative", "Other"]
-                )
-            st.bar_chart(chart_df)
+        # ── Build the underlying export rows once — same grounded data that
+        # was fed to the LLM, so every download reflects exactly what's shown. ──
+        export_rows = []
+        if periods:
+            for label, pp, pn, pu in period_results:
+                for b in pp:
+                    export_rows.append({"Period": label, "Sentiment": "Positive", "Feedback": b})
+                for b in pn:
+                    export_rows.append({"Period": label, "Sentiment": "Negative", "Feedback": b})
+                for b in pu:
+                    export_rows.append({"Period": label, "Sentiment": "Other", "Feedback": b})
+        else:
+            for b in positive_bullets:
+                export_rows.append({"Period": timeframe_label, "Sentiment": "Positive", "Feedback": b})
+            for b in negative_bullets:
+                export_rows.append({"Period": timeframe_label, "Sentiment": "Negative", "Feedback": b})
+            for b in neutral_bullets:
+                export_rows.append({"Period": timeframe_label, "Sentiment": "Other", "Feedback": b})
 
-        # ── "excel"/"export" output format: offer the retrieved data points
-        # as a real downloadable .xlsx (built from the same grounded data
-        # fed to the LLM, so nothing here can be fabricated) ──
-        if output_format == "excel":
-            export_rows = []
-            if periods:
-                for label, pp, pn, pu in period_results:
-                    for b in pp:
-                        export_rows.append({"Period": label, "Sentiment": "Positive", "Feedback": b})
-                    for b in pn:
-                        export_rows.append({"Period": label, "Sentiment": "Negative", "Feedback": b})
-                    for b in pu:
-                        export_rows.append({"Period": label, "Sentiment": "Other", "Feedback": b})
-            else:
-                for b in positive_bullets:
-                    export_rows.append({"Period": timeframe_label, "Sentiment": "Positive", "Feedback": b})
-                for b in negative_bullets:
-                    export_rows.append({"Period": timeframe_label, "Sentiment": "Negative", "Feedback": b})
-                for b in neutral_bullets:
-                    export_rows.append({"Period": timeframe_label, "Sentiment": "Other", "Feedback": b})
+        # ── Sentiment-breakdown chart — always shown as a visual companion
+        # to the text answer, not just when the user explicitly asks for one ──
+        if periods:
+            chart_df = pd.DataFrame({
+                label: {"Positive": len(pp), "Negative": len(pn), "Other": len(pu)}
+                for label, pp, pn, pu in period_results
+            }).T
+        else:
+            chart_df = pd.DataFrame(
+                {"Count": [len(positive_bullets), len(negative_bullets), len(neutral_bullets)]},
+                index=["Positive", "Negative", "Other"]
+            )
+        st.bar_chart(chart_df)
 
+        # ── Downloads: chart data (CSV), full results (Excel), and a
+        # professional PowerPoint report — always available after every
+        # analysis, not gated behind an explicit keyword. ──
+        dl_col1, dl_col2, dl_col3 = st.columns(3)
+        with dl_col1:
+            st.download_button(
+                "⬇️ Chart data (CSV)",
+                data=chart_df.to_csv().encode("utf-8"),
+                file_name="chart_data.csv", mime="text/csv", key="qa_chart_csv"
+            )
+        with dl_col2:
             if export_rows:
                 export_buffer = BytesIO()
                 pd.DataFrame(export_rows).to_excel(export_buffer, index=False, engine="openpyxl")
                 st.download_button(
-                    "⬇️ Download as Excel",
+                    "⬇️ Excel",
                     data=export_buffer.getvalue(),
                     file_name="vog_export.xlsx",
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    key="qa_excel"
                 )
+        with dl_col3:
+            kpis = {
+                "Total data points": actual_point_count,
+                "Positive": sum(len(pp) for _, pp, _, _ in period_results) if periods else len(positive_bullets),
+                "Negative": sum(len(pn) for _, _, pn, _ in period_results) if periods else len(negative_bullets),
+                "Other": sum(len(pu) for _, _, _, pu in period_results) if periods else len(neutral_bullets),
+            }
+            summary_points = split_into_points(full_response, max_points=6)
+            # For a single period, chart_df is indexed by sentiment with one "Count"
+            # column; for a period comparison it's indexed by period with one column
+            # per sentiment — either way, index = labels, and this picks one numeric
+            # series per case (the Count column, or the total across sentiments).
+            chart_values_for_pptx = chart_df.sum(axis=1).tolist() if periods else chart_df.iloc[:, 0].tolist()
+            pptx_bytes = build_pptx_report(
+                title=subject_label or f"{query_intent.title()} Analysis",
+                subtitle=timeframe_label,
+                exec_summary_lines=summary_points[:4] or ["No summary available."],
+                kpis=kpis,
+                chart_title="Sentiment Breakdown" if not periods else "Total Data Points by Period",
+                chart_labels=list(chart_df.index),
+                chart_values=chart_values_for_pptx,
+                chart_type="column",
+                table_headers=["Sentiment", "Feedback"],
+                table_rows=[(row["Sentiment"], row["Feedback"]) for row in export_rows],
+                insights=summary_points[:4],
+                recommendations=summary_points[4:6],
+            )
+            st.download_button(
+                "⬇️ PowerPoint",
+                data=pptx_bytes,
+                file_name="vog_report.pptx",
+                mime="application/vnd.openxmlformats-officedocument.presentationml.presentation",
+                key="qa_pptx"
+            )
 
     final_reply = badge + "\n\n" + header + full_response
     st.session_state.chat_history.append({"role": "assistant", "content": final_reply})
