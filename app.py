@@ -14,7 +14,7 @@ import os
 
 # ── APP BUILD MARKER ── (bump this string whenever the file is regenerated,
 # so it's easy to confirm in the sidebar/logs which version is deployed)
-APP_BUILD = "2026-07-15-v10 (PPTX export, always-on downloads, monthly trend analysis, product/disease fix)"
+APP_BUILD = "2026-07-15-v11 (fix chart axis ordering: chronological trend, ranked bars)"
 
 load_dotenv()
 GROQ_API_KEY = os.getenv("GROQ_API_KEY") or st.secrets.get("GROQ_API_KEY", None)
@@ -644,6 +644,13 @@ def detect_output_format(query_lower: str) -> str | None:
     if re.search(r'\bchart\b|\bgraph\b|\bvisuali[sz]e?\b|\bvisuali[sz]ation\b', query_lower):
         return 'chart'
     return None
+
+
+def with_ordered_index(df):
+    """ Streamlit's bar_chart renders through Vega-Lite, which treats a plain string index as nominal and silently re-sorts it alphabetically — so a ranking chart (highest to lowest) or a fixed Positive/Negative/Other breakdown comes out scrambled. Converting the index to an ordered Categorical (using the DataFrame's current row order as the category order) makes Vega-Lite respect that order instead. """
+    df = df.copy()
+    df.index = pd.CategoricalIndex(df.index, categories=list(df.index), ordered=True)
+    return df
 
 
 def detect_trend_request(query_lower: str) -> bool:
@@ -1543,7 +1550,7 @@ if user_query and user_query.strip():
                     chart_df = pd.DataFrame(
                         {aggregation_dimension.title(): [n for n, _ in ranking], "Mentions": [c for _, c in ranking]}
                     ).set_index(aggregation_dimension.title())
-                    st.bar_chart(chart_df)
+                    st.bar_chart(with_ordered_index(chart_df))
 
                     dl_col1, dl_col2, dl_col3 = st.columns(3)
                     with dl_col1:
@@ -1619,8 +1626,13 @@ if user_query and user_query.strip():
 
             with st.chat_message("assistant"):
                 st.markdown(reply, unsafe_allow_html=True)
+                # Use real Timestamps (not the "Month Year" strings) for the index so
+                # the chart's x-axis sorts chronologically instead of alphabetically —
+                # Vega-Lite (which st.line_chart renders through) treats a plain string
+                # axis as categorical and sorts it alphabetically by default.
+                month_dates = [pd.Timestamp(f"1 {label}") for label, _ in monthly_counts]
                 trend_chart_df = pd.DataFrame(
-                    {"Count": [c for _, c in monthly_counts]}, index=[label for label, _ in monthly_counts]
+                    {"Count": [c for _, c in monthly_counts]}, index=pd.DatetimeIndex(month_dates, name="Month")
                 )
                 st.line_chart(trend_chart_df)
 
@@ -1922,7 +1934,7 @@ if user_query and user_query.strip():
                 {"Count": [len(positive_bullets), len(negative_bullets), len(neutral_bullets)]},
                 index=["Positive", "Negative", "Other"]
             )
-        st.bar_chart(chart_df)
+        st.bar_chart(with_ordered_index(chart_df))
 
         # ── Downloads: chart data (CSV), full results (Excel), and a
         # professional PowerPoint report — always available after every
