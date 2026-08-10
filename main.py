@@ -66,8 +66,7 @@ def _sse(event: str, data: dict) -> str:
 
 @app.get("/", response_class=HTMLResponse)
 def chat_page(request: Request):
-    return templates.TemplateResponse("chat.html", {
-        "request": request,
+    return templates.TemplateResponse(request, "chat.html", {
         "suggested_prompts": vog_core.SUGGESTED_PROMPTS,
         "app_build": APP_BUILD,
     })
@@ -75,8 +74,7 @@ def chat_page(request: Request):
 
 @app.get("/admin", response_class=HTMLResponse)
 def admin_page(request: Request):
-    return templates.TemplateResponse("admin.html", {
-        "request": request,
+    return templates.TemplateResponse(request, "admin.html", {
         "authenticated": bool(request.session.get("authenticated")),
         "error": None,
         "app_build": APP_BUILD,
@@ -88,8 +86,7 @@ def admin_login(request: Request, password: str = Form(...)):
     if password == ADMIN_PASSWORD:
         request.session["authenticated"] = True
         return RedirectResponse(url="/admin", status_code=303)
-    return templates.TemplateResponse("admin.html", {
-        "request": request,
+    return templates.TemplateResponse(request, "admin.html", {
         "authenticated": False,
         "error": "Invalid credentials",
         "app_build": APP_BUILD,
