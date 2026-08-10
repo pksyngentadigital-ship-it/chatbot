@@ -1,0 +1,72 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Admin — Voice of Grower</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <div class="layout">
+    <aside class="sidebar">
+      <h2>⚙️ System Credentials</h2>
+      <p><a href="/">← Back to chat</a></p>
+      <div class="build-tag">Build: {{ app_build }}</div>
+    </aside>
+
+    <main class="main">
+      {% if not authenticated %}
+      <div class="admin-card">
+        <h2>🔑 Admin Login</h2>
+        {% if error %}<p class="error-text">{{ error }}</p>{% endif %}
+        <form method="post" action="/admin/login">
+          <label for="password">Password</label>
+          <input type="password" id="password" name="password" required>
+          <button type="submit">Login</button>
+        </form>
+      </div>
+      {% else %}
+      <div class="admin-card">
+        <h2>📥 Dataset Pipeline Ingestion Panel</h2>
+        <p>🟢 Authorized Mode</p>
+        <form id="ingest-form">
+          <label for="file">Upload Master Performance Log (.xlsx)</label>
+          <input type="file" id="file" name="file" accept=".xlsx" required>
+          <button type="submit">Process Sheets &amp; Map Matrix</button>
+        </form>
+        <p id="ingest-status"></p>
+        <form method="post" action="/admin/logout" style="margin-top: 1.5rem;">
+          <button type="submit" style="background:#9c3b3b;">Logout</button>
+        </form>
+      </div>
+      <script>
+        document.getElementById("ingest-form").addEventListener("submit", async (e) => {
+          e.preventDefault();
+          const fileInput = document.getElementById("file");
+          const statusEl = document.getElementById("ingest-status");
+          if (!fileInput.files.length) return;
+          statusEl.textContent = "Executing server-side matrix mapping...";
+          statusEl.className = "";
+          const formData = new FormData();
+          formData.append("file", fileInput.files[0]);
+          try {
+            const res = await fetch("/admin/ingest", { method: "POST", body: formData });
+            const data = await res.json();
+            if (res.ok && data.success) {
+              statusEl.textContent = `🎉 Pipeline complete! Ingested ${data.total_records} records.`;
+              statusEl.className = "success-text";
+            } else {
+              statusEl.textContent = "⚠️ " + (data.error || "Ingestion failed.");
+              statusEl.className = "error-text";
+            }
+          } catch (err) {
+            statusEl.textContent = "⚠️ " + err.message;
+            statusEl.className = "error-text";
+          }
+        });
+      </script>
+      {% endif %}
+    </main>
+  </div>
+</body>
+</html>

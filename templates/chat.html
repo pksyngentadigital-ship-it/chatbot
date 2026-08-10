@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Strategic Enterprise Performance Analyzer</title>
+  <link rel="stylesheet" href="/static/style.css">
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
+  <script src="https://cdn.jsdelivr.net/npm/marked@12/marked.min.js"></script>
+</head>
+<body>
+  <div class="layout">
+    <aside class="sidebar">
+      <h2>⚙️ System Credentials</h2>
+      <p><a href="/admin">🔑 Admin Panel</a></p>
+      <div class="build-tag">Build: {{ app_build }}</div>
+    </aside>
+
+    <main class="main">
+      <div class="hero-title">🌾 Strategic Enterprise Performance Analyzer 🌱</div>
+      <p class="hero-subtitle">Ask about sentiment 🌾, complaints 🐛, positive feedback 🌻, a specific product 🏷️, or compare weeks / months / years 🔀.</p>
+
+      <details class="suggestions" id="suggestions-box" open>
+        <summary>💡 Not sure what to ask? Try one of these</summary>
+        <div class="suggestion-body">
+          <div class="tab-bar" id="tab-bar">
+            {% for category in suggested_prompts.keys() %}
+            <button class="tab-btn{% if loop.first %} active{% endif %}" data-tab="tab-{{ loop.index }}">{{ category }}</button>
+            {% endfor %}
+          </div>
+          {% for category, prompts in suggested_prompts.items() %}
+          <div class="tab-panel{% if loop.first %} active{% endif %}" id="tab-{{ loop.index }}">
+            {% for prompt in prompts %}
+            <button class="prompt-btn" type="button">{{ prompt }}</button>
+            {% endfor %}
+          </div>
+          {% endfor %}
+        </div>
+      </details>
+
+      <div id="chat-log"></div>
+
+      <form id="chat-form">
+        <input id="chat-input" type="text" autocomplete="off" placeholder="Ask about sentiment, a product, or compare periods..." />
+        <button type="submit" aria-label="Send">⬆️</button>
+      </form>
+    </main>
+  </div>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>

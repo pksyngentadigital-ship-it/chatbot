@@ -6,3 +6,8 @@ requests
 groq
 python-dotenv
 python-pptx
+fastapi
+uvicorn[standard]
+jinja2
+python-multipart
+itsdangerous
