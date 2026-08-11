@@ -88,6 +88,11 @@ POSITIVE_CATEGORIES = {"Positive Feedback"}
 # "top concerns" style queries.
 NEGATIVE_CATEGORIES = {"Complaint/Negative Feedback", "Problem/Advisory"}
 SUGGESTION_CATEGORY  = "Suggestions"
+PRODUCT_QUERY_CATEGORY = "Product Queries"
+SALES_KEYWORDS = [
+    "price", "pricing", "purchase", "buying", "unavailability",
+    "unavailable", "sales-related", "cost of", "availability", "discount"
+]
 
 EMPTY_VALUES = {
     'nan', 'none', '', 'null', '-', 'n/a', 'na',
@@ -96,12 +101,24 @@ EMPTY_VALUES = {
 
 # Known products — matched first (fast path). Extend freely.
 PRODUCT_LIST = [
-    "cropwise", "quantis", "isabion", "allymax", "axial", "walter", "kaho",
-    "solubor", "amistar", "incipio", "simodis", "solvigo", "rifit",
-    "logran", "cruiser", "enrich", "virtako", "proclaim", "thiovet",
-    "pendimethalin", "polytrin", "chlorpyrifos", "glyphosate", "tilt",
-    "actara", "alika", "ridomil", "score", "folicur", "miraculan",
-    "dual gold", "naya potash"
+    # Verified against the real Naya Savera / Syngenta product catalog
+    # (nayasavera.online) — both branded products and generic
+    # active-ingredient names sold there.
+    "cropwise", "quantis", "isabion", "isabion gold", "allymax", "axial",
+    "walter", "walter super", "kaho", "solubor", "amistar", "amistar top",
+    "incipio", "simodis", "solvigo", "rifit", "logran", "cruiser", "enrich",
+    "virtako", "proclaim", "thiovit", "thiovit jet", "thiovet",
+    "pendimethalin", "polytrin", "polytrin c", "chlorpyrifos", "glyphosate",
+    "tilt", "actara", "alika", "ridomil", "score", "folicur", "miraculan",
+    "dual gold", "naya potash", "naya npk", "naya sop",
+    "naya sulphate of potash", "naya s urea", "naya zinc plus", "promix",
+    "promix npk", "karate", "dynasty", "dynasty cst", "buprofezin",
+    "topas", "orondis", "orondis opti", "miravis", "miravis duo",
+    "primextra", "primextra gold", "voliam flexi", "vibrance",
+    "vibrance premium", "vibrance duo", "pyriproxyfin", "polo", "plenum",
+    "revus", "revus start", "copper oxychloride", "metribuzin", "match",
+    "gengwei", "bromoxynil", "dumei", "curacron", "bifenthrin", "ampligo",
+    "acephate", "dragon", "elestal", "elestal neo"
 ]
 
 # Known crops — matched first (fast path) for crop-wise analysis / filtering.
@@ -574,15 +591,52 @@ def extract_crops(text: str) -> list[str]:
     return found
 
 
+# Common transition/adjective words that show up capitalized purely because
+# they start a sentence (e.g. "Excellent results with Isabion.", "However,
+# growers..."). These previously polluted the product-ranking feature with
+# entries like "Excellent", "Best", "However", "Add".
+GENERIC_CAPITALIZED_STOPWORDS = {
+    "however", "therefore", "additionally", "furthermore", "also",
+    "moreover", "meanwhile", "otherwise", "instead", "besides", "thus",
+    "hence", "accordingly", "consequently", "nonetheless", "nevertheless",
+    "add", "added", "adding", "train", "training", "commerce", "delivery",
+    "excellent", "good", "best", "great", "nice", "poor", "bad", "better",
+    "worse", "worst", "outstanding", "exceptional", "effective",
+    "ineffective", "satisfactory", "unsatisfactory", "quality", "results",
+    "result", "perfect", "amazing", "wonderful", "fantastic", "impressive",
+    "disappointing", "happy", "unhappy", "pleased", "displeased", "overall",
+    "regarding", "concerning", "unfortunately", "fortunately", "currently",
+    "recently", "generally", "specifically", "basically", "actually",
+    "certainly", "definitely", "probably", "possibly", "apparently",
+    "clearly", "obviously", "importantly", "essentially",
+}
+PRODUCT_STOPWORDS |= GENERIC_CAPITALIZED_STOPWORDS
+
+
 def extract_product_mentions(text: str) -> list[str]:
-    """ Tag likely product/brand names mentioned in a feedback bullet, for ingestion-time metadata used by deterministic ranking ("which product received the highest complaints"). Heuristic: capitalized word sequences (1-3 words) that aren't generic English/stopwords/month names — this generalizes beyond the curated PRODUCT_LIST to any brand name that shows up in the data without needing to hardcode every product. """
-    candidates = re.findall(r'\b([A-Z][a-zA-Z]{2,}(?:\s+[A-Z][a-zA-Z]{2,}){0,2})\b', text)
+    """ Tag likely product/brand names mentioned in a feedback bullet, for ingestion-time metadata used by deterministic ranking ("which product received the highest complaints"). Two passes: (1) known catalog products (PRODUCT_LIST) matched anywhere in the text and tagged with a canonical name — reliable even if the product isn't capitalized in the source text; (2) a capitalized-phrase heuristic fallback for brand names not yet in the curated list, filtered against a broad stopword set so sentence-initial adjectives/transition words don't get mistaken for products. """
+    text_lower = text.lower()
     out, seen = [], set()
+
+    for product in PRODUCT_LIST:
+        if re.search(r'\b' + re.escape(product) + r'\b', text_lower):
+            canonical = " ".join(
+                w.upper() if w.lower() in ("sop", "cst", "npk") else w.capitalize()
+                for w in product.split()
+            )
+            key = canonical.lower()
+            if key not in seen:
+                seen.add(key)
+                out.append(canonical)
+
+    candidates = re.findall(r'\b([A-Z][a-zA-Z]{2,}(?:\s+[A-Z][a-zA-Z]{2,}){0,2})\b', text)
     for cand in candidates:
         words = cand.split()
         if all(w.lower() in PRODUCT_STOPWORDS or w.lower() in MONTH_MAP for w in words):
             continue
         if any(w.lower() in DISEASE_PEST_WORDS for w in words):
+            continue
+        if any(w.lower() in GENERIC_CAPITALIZED_STOPWORDS for w in words):
             continue
         if cand.strip().lower() in ("syngenta",):
             continue
@@ -622,7 +676,29 @@ def build_comparison_periods(all_months, all_years, all_weeks, index):
 
 
 def detect_aggregation_request(query_lower: str) -> str | None:
-    """ Detects queries that want a deterministic, counted ranking ("which crop generated the highest number of complaints", "products with the highest complaint frequency") rather than free-form LLM summarization. Returns 'crop' or 'product' — the metadata field to rank by — or None. Kept separate from the normal retrieval flow because counting must be exact (computed in Python from real metadata tags), never left to the LLM to eyeball from a handful of retrieved bullets. """
+    """ Detects queries that want a deterministic, counted ranking ("which crop generated the highest number of complaints", "products with the highest complaint frequency") rather than free-form LLM summarization. Returns 'crop' or 'product' — the metadata field to rank by — or None. Kept separate from the normal retrieval flow because counting must be exact (computed in Python from real metadata tags), never left to the LLM to eyeball from a handful of retrieved bullets. Requires crop/product to be the explicit SUBJECT of the ranking (e.g. "which crop...", "products with the highest...") — a bare co-occurrence of a rank word and the word "product" isn't enough, since that also matches open-ended synthesis asks like "most common product improvement recommendations", which want an LLM to cluster free text, not a tag count. """
+    synthesis_markers = [
+        'recommend', 'suggestion', 'insight', 'improvement', 'expectation',
+        'root cause', 'strategic action',
+    ]
+    if any(m in query_lower for m in synthesis_markers):
+        return None
+
+    crop_subject = bool(
+        re.search(r'\bwhich\s+crops?\b', query_lower)
+        or re.search(r'\bcrops?\s+(?:with|that|generated|received|has|have)\b', query_lower)
+        or re.search(r'\btop\s+\d+\s+crops?\b', query_lower)
+        or re.search(r'\bcrop[- ]wise\s+ranking\b', query_lower)
+    )
+    product_subject = bool(
+        re.search(r'\bwhich\s+products?\b', query_lower)
+        or re.search(r'\bproducts?\s+(?:with|that|generated|received|has|have)\b', query_lower)
+        or re.search(r'\btop\s+\d+\s+products?\b', query_lower)
+        or re.search(r'\bproduct[- ]wise\s+ranking\b', query_lower)
+    )
+    if not (crop_subject or product_subject):
+        return None
+
     rank_phrases = [
         'highest number of', 'highest', 'most frequent', 'most complaints',
         'most common', 'ranking', 'rank ', 'frequency', 'greatest'
@@ -634,11 +710,8 @@ def detect_aggregation_request(query_lower: str) -> str | None:
     )
     if not wants_ranking:
         return None
-    if 'crop' in query_lower:
-        return 'crop'
-    if 'product' in query_lower:
-        return 'product'
-    return None
+
+    return 'crop' if crop_subject else 'product'
 
 
 def fetch_matches_for_aggregation(index, filter_conditions, top_k=10000):
@@ -1347,6 +1420,8 @@ def process_chat_query(user_query: str, pinecone_api_key: str, groq_api_key: str
         query_intent = "sentiment"
 
     category_filter = SUGGESTION_CATEGORY if query_intent == "suggestion" else None
+    if not category_filter and query_intent == "sentiment" and any(k in query_lower for k in SALES_KEYWORDS):
+        category_filter = PRODUCT_QUERY_CATEGORY
 
     pc = Pinecone(api_key=pinecone_api_key)
     index = pc.Index(PINECONE_INDEX_NAME)
