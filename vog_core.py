@@ -1371,7 +1371,15 @@ def detect_followup_reference(query_lower: str) -> bool:
 
 def process_chat_query(user_query: str, pinecone_api_key: str, groq_api_key: str | None = None, prior_context: dict | None = None) -> dict:
     """ Runs everything up to (but not including) the Groq call. Returns a dict with "kind": - "blocked": off-topic query. "reply" is ready to show. - "no_key": Pinecone not configured. "reply" is ready to show. - "ranking" / "trend" / "no_data": fully resolved without needing an LLM — "reply" (markdown), optionally "chart" ({"type","title","labels","values"}) and "downloads" ({"csv","excel","pptx"} bytes). - "normal": needs an LLM call. Contains "system_prompt" / "user_prompt" ready to send to Groq, plus everything finalize_normal_response() will need afterwards. prior_context (optional): {"product","crop","intent"} resolved from the previous turn. Only used to fill in slots the CURRENT query left unspecified, and only when the query contains an explicit continuation phrase ("what about wheat?") — never silently overrides anything the current query itself states, so a fresh unrelated question is never scoped by accident. """
-    if not is_query_in_scope(user_query):
+    query_lower = user_query.lower()
+
+    # A bare continuation phrase ("what about last month?") carries no
+    # domain keyword of its own — it only makes sense in light of a prior
+    # in-scope turn, so it's allowed past the guardrail exactly when there
+    # IS prior context for it to continue.
+    is_followup_continuation = bool(prior_context) and detect_followup_reference(query_lower)
+
+    if not is_query_in_scope(user_query) and not is_followup_continuation:
         return {
             "kind": "blocked",
             "reply": (
@@ -1383,8 +1391,6 @@ def process_chat_query(user_query: str, pinecone_api_key: str, groq_api_key: str
 
     if not pinecone_api_key:
         return {"kind": "no_key", "reply": "🤖 Execution Halted: Pinecone API key is not configured."}
-
-    query_lower = user_query.lower()
 
     all_months = extract_all_months(query_lower)
     all_years = extract_all_years(query_lower)
