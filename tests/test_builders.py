@@ -84,6 +84,24 @@ def test_system_prompt_focuses_exclusively_on_active_product():
     assert "Focus EXCLUSIVELY on the product 'Isabion'" in prompt
 
 
+def test_system_prompt_avoid_repeat_text_appends_continuation_clause():
+    prompt = vc.build_system_prompt(
+        "sentiment", "January 2026", explicit_list_format=False,
+        active_product="isabion", periods=[],
+        avoid_repeat_text="Growers liked the packaging and delivery speed.",
+    )
+    assert "CONTINUATION REQUEST" in prompt
+    assert "Growers liked the packaging and delivery speed." in prompt
+
+
+def test_system_prompt_omits_continuation_clause_by_default():
+    prompt = vc.build_system_prompt(
+        "sentiment", "January 2026", explicit_list_format=False,
+        active_product="isabion", periods=[],
+    )
+    assert "CONTINUATION REQUEST" not in prompt
+
+
 def test_system_prompt_table_output_format_overrides_bullet_format():
     prompt = vc.build_system_prompt(
         "sentiment", "January 2026", explicit_list_format=True,

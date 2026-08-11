@@ -208,7 +208,12 @@ PRODUCT_STOPWORDS = {
     "two", "three", "four", "five", "recent", "latest", "last", "current",
     "previous", "next", "prior", "season", "seasons", "compared", "across",
     "during", "within", "improved", "day", "days", "reported", "report",
-    "reports", "generated", "received", "found", "total", "number", "numbers"
+    "reports", "generated", "received", "found", "total", "number", "numbers",
+    # "other"/"others" show up constantly in ordinary feedback prose (e.g.
+    # "no other issues", "compared to other products") — without this, the
+    # dynamic product-probe fallback mistakes the word itself for a product
+    # name whenever a query like "what other insights..." reaches it.
+    "other", "others", "another", "anything", "something", "else"
 } | set(MONTH_MAP.keys()) | set(BUSINESS_KEYWORDS) | set(DISEASE_PEST_TERMS)
 
 ALLOWED_GUARDRAIL_KEYWORDS = set([
@@ -990,7 +995,7 @@ def build_intent_badge(query_intent, active_product, periods, active_crop=None):
     return "🌾 Sentiment Overview"
 
 
-def build_system_prompt(query_intent, timeframe_label, explicit_list_format, active_product, periods, active_crop=None, output_format=None, wants_products_only=False):
+def build_system_prompt(query_intent, timeframe_label, explicit_list_format, active_product, periods, active_crop=None, output_format=None, wants_products_only=False, avoid_repeat_text=None):
     """ Unified prompt builder. Preserves the original prose behaviour (including the two-paragraph favorable/complaints structure for the default sentiment case) while adding: real markdown bullet formatting when the user explicitly asks to "list" something, strict single-product/crop focus, explicit period-by-period comparison instructions, and output-format overrides (table / executive summary / PPT outline). """
     product_label = active_product.title() if active_product else None
     crop_label = active_crop.title() if active_crop else None
@@ -1155,6 +1160,19 @@ def build_system_prompt(query_intent, timeframe_label, explicit_list_format, act
         "from the Data Context above — never introduce a product or detail that isn't "
         "explicitly there."
     )
+
+    if avoid_repeat_text:
+        system_prompt += (
+            "\n\nCONTINUATION REQUEST: The user already received the response below "
+            "earlier in this conversation and is now explicitly asking for MORE or "
+            "DIFFERENT points on the same subject — not a repeat. Do not restate any "
+            "point from it in substantially the same words. Pull NEW points from the "
+            "Data Context that weren't already covered. If nothing further is "
+            "supported by the Data Context, say plainly that there isn't anything "
+            "further to add rather than repeating the earlier points.\n\n"
+            f"Previous response already given:\n{avoid_repeat_text}"
+        )
+
     return system_prompt
 
 
@@ -1376,10 +1394,30 @@ FOLLOWUP_PHRASES = [
     "what if", "and how about",
 ]
 
+# Phrases that explicitly ask for MORE/DIFFERENT points on the same subject
+# rather than a repeat of the last answer — "what other insights", "anything
+# else", "what more can you tell me". These also count as a follow-up
+# continuation (so product/crop/intent are inherited), but additionally
+# signal that the previous answer's exact text should be passed to the LLM
+# as "already said" content to avoid parroting the same points back.
+MORE_INSIGHTS_PHRASES = [
+    "what other", "any other", "anything else", "what else",
+    "else can you", "more insight", "other insight", "something else",
+    "what more", "anything more", "else you can", "more detail",
+    "more information", "additional insight", "additional detail",
+]
+
+FOLLOWUP_PHRASES = FOLLOWUP_PHRASES + MORE_INSIGHTS_PHRASES
+
 
 def detect_followup_reference(query_lower: str) -> bool:
     """ Detects explicit conversational continuation phrasing ("what about wheat?", "and for Isabion?") — deliberately narrow (exact phrase match, not just "short query") so an unrelated fresh question never accidentally inherits stale context from a few turns ago. """
     return any(p in query_lower for p in FOLLOWUP_PHRASES)
+
+
+def detect_wants_more(query_lower: str) -> bool:
+    """Detects a request for MORE/DIFFERENT points on the same subject, as opposed to a plain repeat of the previous question — used to tell the LLM what was already said so it doesn't repeat itself."""
+    return any(p in query_lower for p in MORE_INSIGHTS_PHRASES)
 
 
 def process_chat_query(user_query: str, pinecone_api_key: str, groq_api_key: str | None = None, prior_context: dict | None = None) -> dict:
@@ -1499,6 +1537,7 @@ def process_chat_query(user_query: str, pinecone_api_key: str, groq_api_key: str
     # ── Follow-up slot inheritance: only fills gaps the CURRENT query left
     # unspecified, and only on an explicit continuation phrase — never
     # overrides anything the current query itself states. ──
+    avoid_repeat_text = None
     if prior_context and detect_followup_reference(query_lower):
         if not active_product and prior_context.get("product"):
             active_product = prior_context["product"]
@@ -1507,6 +1546,11 @@ def process_chat_query(user_query: str, pinecone_api_key: str, groq_api_key: str
         if not intent_explicit and prior_context.get("intent"):
             query_intent = prior_context["intent"]
             category_filter = SUGGESTION_CATEGORY if query_intent == "suggestion" else category_filter
+        # "what other insights...", "anything else..." — explicitly asking
+        # for MORE/DIFFERENT points, not a repeat. Pass the previous answer
+        # to the LLM so it doesn't parrot the same points back.
+        if detect_wants_more(query_lower):
+            avoid_repeat_text = prior_context.get("last_reply")
 
     retrieval_vector = query_vector
     retrieval_top_k = 100
@@ -1690,7 +1734,8 @@ def process_chat_query(user_query: str, pinecone_api_key: str, groq_api_key: str
 
     system_prompt = build_system_prompt(
         query_intent, timeframe_label, explicit_list_format, active_product, periods,
-        active_crop=active_crop, output_format=output_format, wants_products_only=wants_products_only
+        active_crop=active_crop, output_format=output_format, wants_products_only=wants_products_only,
+        avoid_repeat_text=avoid_repeat_text
     )
     user_prompt = (
         f"Timeframe: {timeframe_label}\n\n"

@@ -55,6 +55,15 @@ def test_extract_product_mentions_excludes_syngenta_itself():
     assert "Syngenta" not in mentions
 
 
+def test_extract_product_mentions_excludes_the_word_other():
+    # "Other" shows up constantly in ordinary feedback prose and must never
+    # be tagged as a product — this was a real production bug.
+    text = "Other than that, growers had no other complaints this month."
+    mentions = vc.extract_product_mentions(text)
+    assert "Other" not in mentions
+    assert "Others" not in mentions
+
+
 def test_extract_product_mentions_no_duplicates():
     text = "Isabion worked well. Isabion Gold was also appreciated."
     mentions = vc.extract_product_mentions(text)
@@ -159,6 +168,22 @@ def test_followup_reference_detects_explicit_continuation():
 
 def test_followup_reference_false_on_unrelated_fresh_question():
     assert vc.detect_followup_reference("what are the top complaints for cotton?") is False
+
+
+def test_followup_reference_detects_more_insights_phrasing():
+    assert vc.detect_followup_reference("what other insights can you tell me?") is True
+    assert vc.detect_followup_reference("anything else you can share?") is True
+
+
+# ── detect_wants_more ──
+
+def test_wants_more_detects_explicit_more_request():
+    assert vc.detect_wants_more("what other insights can you tell me?") is True
+    assert vc.detect_wants_more("what else can you tell me about it?") is True
+
+
+def test_wants_more_false_on_fresh_question():
+    assert vc.detect_wants_more("what are the top complaints for wheat?") is False
 
 
 # ── is_query_in_scope: the strict topic guardrail ──

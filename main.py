@@ -230,7 +230,10 @@ def chat(request: Request, q: str):
         result = vog_core.finalize_normal_response(state, full_response)
         download_id = _store_downloads(result["downloads"])
         if "context" in state:
-            session_data["prior_context"] = state["context"]
+            # Carry the reply text forward too, so a later "what other
+            # insights..." follow-up can be told what was already said and
+            # avoid repeating it.
+            session_data["prior_context"] = {**state["context"], "last_reply": full_response}
         _append_history(session_data, {
             "role": "assistant", "kind": "normal", "badge": badge,
             "content": header + full_response, "chart": result["chart"],
