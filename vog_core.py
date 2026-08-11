@@ -1357,8 +1357,20 @@ def is_query_in_scope(user_query: str) -> bool:
     return any(word in ALLOWED_GUARDRAIL_KEYWORDS for word in query_words)
 
 
-def process_chat_query(user_query: str, pinecone_api_key: str, groq_api_key: str | None = None) -> dict:
-    """ Runs everything up to (but not including) the Groq call. Returns a dict with "kind": - "blocked": off-topic query. "reply" is ready to show. - "no_key": Pinecone not configured. "reply" is ready to show. - "ranking" / "trend" / "no_data": fully resolved without needing an LLM — "reply" (markdown), optionally "chart" ({"type","title","labels","values"}) and "downloads" ({"csv","excel","pptx"} bytes). - "normal": needs an LLM call. Contains "system_prompt" / "user_prompt" ready to send to Groq, plus everything finalize_normal_response() will need afterwards. """
+FOLLOWUP_PHRASES = [
+    "what about", "how about", "what's about", "and what about",
+    "same for", "also for", "and for", "what of", "and about",
+    "what if", "and how about",
+]
+
+
+def detect_followup_reference(query_lower: str) -> bool:
+    """ Detects explicit conversational continuation phrasing ("what about wheat?", "and for Isabion?") — deliberately narrow (exact phrase match, not just "short query") so an unrelated fresh question never accidentally inherits stale context from a few turns ago. """
+    return any(p in query_lower for p in FOLLOWUP_PHRASES)
+
+
+def process_chat_query(user_query: str, pinecone_api_key: str, groq_api_key: str | None = None, prior_context: dict | None = None) -> dict:
+    """ Runs everything up to (but not including) the Groq call. Returns a dict with "kind": - "blocked": off-topic query. "reply" is ready to show. - "no_key": Pinecone not configured. "reply" is ready to show. - "ranking" / "trend" / "no_data": fully resolved without needing an LLM — "reply" (markdown), optionally "chart" ({"type","title","labels","values"}) and "downloads" ({"csv","excel","pptx"} bytes). - "normal": needs an LLM call. Contains "system_prompt" / "user_prompt" ready to send to Groq, plus everything finalize_normal_response() will need afterwards. prior_context (optional): {"product","crop","intent"} resolved from the previous turn. Only used to fill in slots the CURRENT query left unspecified, and only when the query contains an explicit continuation phrase ("what about wheat?") — never silently overrides anything the current query itself states, so a fresh unrelated question is never scoped by accident. """
     if not is_query_in_scope(user_query):
         return {
             "kind": "blocked",
@@ -1410,14 +1422,19 @@ def process_chat_query(user_query: str, pinecone_api_key: str, groq_api_key: str
     ]
 
     query_intent = "sentiment"
+    intent_explicit = False
     if any(phrase in query_lower for phrase in complaint_keywords):
         query_intent = "complaint"
+        intent_explicit = True
     elif any(phrase in query_lower for phrase in positive_keywords):
         query_intent = "positive"
+        intent_explicit = True
     elif any(phrase in query_lower for phrase in suggestion_keywords):
         query_intent = "suggestion"
+        intent_explicit = True
     elif any(word in query_lower for word in sentiment_keywords):
         query_intent = "sentiment"
+        intent_explicit = True
 
     category_filter = SUGGESTION_CATEGORY if query_intent == "suggestion" else None
     if not category_filter and query_intent == "sentiment" and any(k in query_lower for k in SALES_KEYWORDS):
@@ -1459,6 +1476,18 @@ def process_chat_query(user_query: str, pinecone_api_key: str, groq_api_key: str
     active_crop = detect_crop(query_lower)
     if active_product and active_crop and active_product.lower() == active_crop.lower():
         active_product = None
+
+    # ── Follow-up slot inheritance: only fills gaps the CURRENT query left
+    # unspecified, and only on an explicit continuation phrase — never
+    # overrides anything the current query itself states. ──
+    if prior_context and detect_followup_reference(query_lower):
+        if not active_product and prior_context.get("product"):
+            active_product = prior_context["product"]
+        if not active_crop and prior_context.get("crop"):
+            active_crop = prior_context["crop"]
+        if not intent_explicit and prior_context.get("intent"):
+            query_intent = prior_context["intent"]
+            category_filter = SUGGESTION_CATEGORY if query_intent == "suggestion" else category_filter
 
     retrieval_vector = query_vector
     retrieval_top_k = 100
@@ -1568,6 +1597,7 @@ def process_chat_query(user_query: str, pinecone_api_key: str, groq_api_key: str
     header = build_header(query_intent, timeframe_label, active_product, periods, active_crop)
     badge = build_intent_badge(query_intent, active_product, periods, active_crop)
     subject_label = build_subject_label(active_product, active_crop)
+    resolved_context = {"product": active_product, "crop": active_crop, "intent": query_intent}
 
     if total_found == 0:
         if periods:
@@ -1584,7 +1614,7 @@ def process_chat_query(user_query: str, pinecone_api_key: str, groq_api_key: str
                 "I am strictly locked to analyzed dataset metrics "
                 "and cannot find relevant information for this query."
             )
-        return {"kind": "no_data", "reply": reply}
+        return {"kind": "no_data", "reply": reply, "context": resolved_context}
 
     MAX_BULLETS = 12
 
@@ -1668,6 +1698,7 @@ def process_chat_query(user_query: str, pinecone_api_key: str, groq_api_key: str
         "negative_bullets": negative_bullets,
         "neutral_bullets": neutral_bullets,
         "actual_point_count": actual_point_count,
+        "context": resolved_context,
     }
 
 

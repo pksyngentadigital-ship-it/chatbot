@@ -26,7 +26,7 @@ PINECONE_API_KEY = os.getenv("PINECONE_API_KEY")
 SESSION_SECRET = os.getenv("SESSION_SECRET", "dev-only-secret-change-me")
 ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "admin123")
 
-APP_BUILD = "2026-08-10-v5 (QA pass: real product catalog, ranking accuracy, sales scoping)"
+APP_BUILD = "2026-08-10-v6 (multi-turn follow-up support: 'what about wheat?')"
 
 app = FastAPI(title="Voice of Grower")
 app.add_middleware(SessionMiddleware, secret_key=SESSION_SECRET)
@@ -121,12 +121,20 @@ async def admin_ingest(request: Request, file: UploadFile = File(...)):
 # ==========================================
 
 @app.get("/chat")
-def chat(q: str):
-    """ Streams the answer as Server-Sent Events. Event types: - "start": {badge, header} — sent once, right before token streaming begins (kind="normal" only). - "token": {token} — one LLM token at a time. - "final": {kind, badge, header, reply|full_response, chart, download_id} — always the last event; frontend renders the finished bubble + chart + download links from this. - "error": {message} """
+def chat(q: str, ctx: str = ""):
+    """ Streams the answer as Server-Sent Events. Event types: - "start": {badge, header} — sent once, right before token streaming begins (kind="normal" only). - "token": {token} — one LLM token at a time. - "final": {kind, badge, header, reply|full_response, chart, download_id, context} — always the last event; frontend renders the finished bubble + chart + download links from this, and stashes "context" client-side to send back as `ctx` on the next request (multi-turn follow-up support — see vog_core.detect_followup_reference). - "error": {message} `ctx` is a JSON object {"product","crop","intent"} the client got from the previous turn's "final" event; malformed/missing ctx is treated as "no prior context" rather than an error. """
+    prior_context = None
+    if ctx:
+        try:
+            parsed = json.loads(ctx)
+            if isinstance(parsed, dict):
+                prior_context = parsed
+        except (json.JSONDecodeError, TypeError):
+            prior_context = None
 
     def event_stream():
         try:
-            state = vog_core.process_chat_query(q, PINECONE_API_KEY, GROQ_API_KEY)
+            state = vog_core.process_chat_query(q, PINECONE_API_KEY, GROQ_API_KEY, prior_context=prior_context)
         except Exception as e:
             yield _sse("error", {"message": str(e)})
             return
@@ -137,6 +145,7 @@ def chat(q: str):
             yield _sse("final", {
                 "kind": kind, "badge": None, "header": "",
                 "reply": state["reply"], "chart": None, "download_id": None,
+                "context": state.get("context"),
             })
             return
 
@@ -145,7 +154,7 @@ def chat(q: str):
             yield _sse("final", {
                 "kind": kind, "badge": state.get("badge"), "header": "",
                 "reply": state["reply"], "chart": state.get("chart"),
-                "download_id": download_id,
+                "download_id": download_id, "context": None,
             })
             return
 
@@ -174,7 +183,7 @@ def chat(q: str):
         yield _sse("final", {
             "kind": "normal", "badge": badge, "header": header,
             "reply": full_response, "chart": result["chart"],
-            "download_id": download_id,
+            "download_id": download_id, "context": state.get("context"),
         })
 
     return StreamingResponse(event_stream(), media_type="text/event-stream", headers={
