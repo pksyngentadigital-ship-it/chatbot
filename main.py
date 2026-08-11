@@ -26,7 +26,7 @@ PINECONE_API_KEY = os.getenv("PINECONE_API_KEY")
 SESSION_SECRET = os.getenv("SESSION_SECRET", "dev-only-secret-change-me")
 ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "admin123")
 
-APP_BUILD = "2026-07-15-v1 (FastAPI + HTML/JS rebuild, Plan B)"
+APP_BUILD = "2026-08-10-v2 (Voice of Grower premium minimal rebrand)"
 
 app = FastAPI(title="Voice of Grower")
 app.add_middleware(SessionMiddleware, secret_key=SESSION_SECRET)

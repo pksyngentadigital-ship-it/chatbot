@@ -3,48 +3,55 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Strategic Enterprise Performance Analyzer</title>
+  <title>Voice of Grower</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E%F0%9F%8C%BE%3C/text%3E%3C/svg%3E">
   <link rel="stylesheet" href="/static/style.css">
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
   <script src="https://cdn.jsdelivr.net/npm/marked@12/marked.min.js"></script>
 </head>
 <body>
-  <div class="layout">
-    <aside class="sidebar">
-      <h2>⚙️ System Credentials</h2>
-      <p><a href="/admin">🔑 Admin Panel</a></p>
-      <div class="build-tag">Build: {{ app_build }}</div>
-    </aside>
+  <header class="topbar">
+    <div class="topbar-inner">
+      <a href="/" class="wordmark"><span class="wordmark-mark">🌾</span> Voice of Grower</a>
+      <a href="/admin" class="icon-link" title="Admin" aria-label="Admin">
+        <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"></path></svg>
+      </a>
+    </div>
+  </header>
 
-    <main class="main">
-      <div class="hero-title">🌾 Strategic Enterprise Performance Analyzer 🌱</div>
-      <p class="hero-subtitle">Ask about sentiment 🌾, complaints 🐛, positive feedback 🌻, a specific product 🏷️, or compare weeks / months / years 🔀.</p>
+  <main class="shell">
+    <section id="welcome" class="welcome">
+      <div class="welcome-mark">🌾</div>
+      <h1>Voice of Grower</h1>
+      <p class="welcome-sub">Ask about sentiment, complaints, products, crops, or trends — grounded entirely in your grower feedback data.</p>
 
-      <details class="suggestions" id="suggestions-box" open>
-        <summary>💡 Not sure what to ask? Try one of these</summary>
-        <div class="suggestion-body">
-          <div class="tab-bar" id="tab-bar">
-            {% for category in suggested_prompts.keys() %}
-            <button class="tab-btn{% if loop.first %} active{% endif %}" data-tab="tab-{{ loop.index }}">{{ category }}</button>
-            {% endfor %}
-          </div>
-          {% for category, prompts in suggested_prompts.items() %}
-          <div class="tab-panel{% if loop.first %} active{% endif %}" id="tab-{{ loop.index }}">
-            {% for prompt in prompts %}
-            <button class="prompt-btn" type="button">{{ prompt }}</button>
-            {% endfor %}
-          </div>
+      <div class="suggestions" id="suggestions-box">
+        <div class="tab-bar" id="tab-bar">
+          {% for category in suggested_prompts.keys() %}
+          <button class="tab-btn{% if loop.first %} active{% endif %}" data-tab="tab-{{ loop.index }}" type="button">{{ category }}</button>
           {% endfor %}
         </div>
-      </details>
+        {% for category, prompts in suggested_prompts.items() %}
+        <div class="tab-panel{% if loop.first %} active{% endif %}" id="tab-{{ loop.index }}">
+          {% for prompt in prompts %}
+          <button class="prompt-card" type="button">{{ prompt }}</button>
+          {% endfor %}
+        </div>
+        {% endfor %}
+      </div>
+    </section>
 
-      <div id="chat-log"></div>
+    <div id="chat-log" class="chat-log"></div>
+  </main>
 
-      <form id="chat-form">
-        <input id="chat-input" type="text" autocomplete="off" placeholder="Ask about sentiment, a product, or compare periods..." />
-        <button type="submit" aria-label="Send">⬆️</button>
-      </form>
-    </main>
+  <div class="composer-wrap">
+    <form id="chat-form" class="composer">
+      <textarea id="chat-input" rows="1" autocomplete="off" placeholder="Message Voice of Grower..."></textarea>
+      <button type="submit" id="send-btn" aria-label="Send" disabled>
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="19" x2="12" y2="5"></line><polyline points="5 12 12 5 19 12"></polyline></svg>
+      </button>
+    </form>
+    <div class="composer-footnote">Voice of Grower can make mistakes. Answers are grounded in your ingested feedback data.</div>
   </div>
 
   <script src="/static/app.js"></script>

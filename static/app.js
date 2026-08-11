@@ -8,32 +8,38 @@ document.querySelectorAll(".tab-btn").forEach((btn) => {
   });
 });
 
-document.querySelectorAll(".prompt-btn").forEach((btn) => {
+document.querySelectorAll(".prompt-card").forEach((btn) => {
   btn.addEventListener("click", () => {
     document.getElementById("chat-input").value = btn.textContent;
     document.getElementById("chat-form").requestSubmit();
   });
 });
 
-// ── Badge → CSS class mapping (mirrors the Streamlit build's badge_html) ──
-function badgeClass(badgeText) {
-  if (!badgeText) return "badge-sentiment";
-  if (badgeText.startsWith("🔀")) return "badge-comparison";
-  if (badgeText.startsWith("🏷️")) return "badge-product";
-  if (badgeText.startsWith("🐛")) return "badge-complaint";
-  if (badgeText.startsWith("🌻")) return "badge-positive";
-  if (badgeText.startsWith("💡")) return "badge-suggestion";
-  if (badgeText.startsWith("📊") || badgeText.startsWith("📈")) return "badge-ranking";
-  return "badge-sentiment";
+// ── Badge label (mirrors the Streamlit build's badge text, minimal style) ──
+function renderBadge(badgeText) {
+  if (!badgeText) return "";
+  return `<span class="badge">${badgeText}</span>`;
+}
+
+function scrollToBottom() {
+  window.scrollTo({ top: document.body.scrollHeight, behavior: "smooth" });
+}
+
+function collapseWelcome() {
+  const welcome = document.getElementById("welcome");
+  if (welcome) welcome.classList.add("collapsed");
 }
 
 function addUserMessage(text) {
   const log = document.getElementById("chat-log");
   const div = document.createElement("div");
   div.className = "msg user";
-  div.textContent = text;
+  const body = document.createElement("div");
+  body.className = "msg-body";
+  body.textContent = text;
+  div.appendChild(body);
   log.appendChild(div);
-  log.scrollIntoView({ behavior: "smooth", block: "end" });
+  scrollToBottom();
   return div;
 }
 
@@ -43,10 +49,10 @@ function addAssistantMessage() {
   wrap.className = "msg assistant";
   const spinner = document.createElement("div");
   spinner.className = "spinner-row";
-  spinner.innerHTML = '<span class="spinner"></span> Searching and aggregating matching historical data records...';
+  spinner.innerHTML = '<span class="spinner"></span> Thinking...';
   wrap.appendChild(spinner);
   log.appendChild(wrap);
-  log.scrollIntoView({ behavior: "smooth", block: "end" });
+  scrollToBottom();
   return wrap;
 }
 
@@ -66,6 +72,11 @@ function renderChart(container, chart) {
   chartWrap.appendChild(canvas);
   container.appendChild(chartWrap);
 
+  const styles = getComputedStyle(document.documentElement);
+  const accent = styles.getPropertyValue("--accent").trim() || "#3f6b3f";
+  const gridColor = styles.getPropertyValue("--border").trim() || "#e5e5e5";
+  const textColor = styles.getPropertyValue("--text-muted").trim() || "#666";
+
   new Chart(canvas, {
     type: chart.type === "line" ? "line" : "bar",
     data: {
@@ -73,16 +84,21 @@ function renderChart(container, chart) {
       datasets: [{
         label: chart.title || "Value",
         data: chart.values,
-        backgroundColor: "#2e7d32",
-        borderColor: "#2e7d32",
+        backgroundColor: accent,
+        borderColor: accent,
+        borderRadius: chart.type === "line" ? 0 : 6,
         fill: false,
-        tension: 0.25,
+        tension: 0.3,
+        pointRadius: chart.type === "line" ? 2 : 0,
       }],
     },
     options: {
       responsive: true,
-      plugins: { legend: { display: false }, title: { display: !!chart.title, text: chart.title } },
-      scales: { y: { beginAtZero: true } },
+      plugins: { legend: { display: false } },
+      scales: {
+        y: { beginAtZero: true, grid: { color: gridColor }, ticks: { color: textColor, font: { size: 11 } } },
+        x: { grid: { display: false }, ticks: { color: textColor, font: { size: 11 } } },
+      },
     },
   });
 }
@@ -92,43 +108,38 @@ function renderDownloads(container, downloadId) {
   const wrap = document.createElement("div");
   wrap.className = "downloads";
   const items = [
-    ["csv", "⬇️ Chart data (CSV)"],
-    ["excel", "⬇️ Excel"],
-    ["pptx", "⬇️ PowerPoint"],
+    ["csv", "CSV"],
+    ["excel", "Excel"],
+    ["pptx", "PowerPoint"],
   ];
   items.forEach(([kind, label]) => {
     const a = document.createElement("a");
     a.className = "dl-btn";
     a.href = `/download/${downloadId}/${kind}`;
-    a.textContent = label;
+    a.textContent = `↓ ${label}`;
     wrap.appendChild(a);
   });
   container.appendChild(wrap);
 }
 
 function sendQuery(query) {
+  collapseWelcome();
   addUserMessage(query);
   const assistantWrap = addAssistantMessage();
 
   let bodyHtml = "";
-  let badgeText = null;
   let headerText = "";
 
   const es = new EventSource(`/chat?q=${encodeURIComponent(query)}`);
 
   es.addEventListener("start", (e) => {
     const data = JSON.parse(e.data);
-    badgeText = data.badge;
     headerText = data.header || "";
     assistantWrap.innerHTML = "";
-    if (badgeText) {
-      const badge = document.createElement("span");
-      badge.className = `intent-badge ${badgeClass(badgeText)}`;
-      badge.textContent = badgeText;
-      assistantWrap.appendChild(badge);
-    }
+    if (data.badge) assistantWrap.insertAdjacentHTML("beforeend", renderBadge(data.badge));
     const body = document.createElement("div");
     body.className = "msg-body";
+    body.innerHTML = '<span class="cursor-blink"></span>';
     assistantWrap.appendChild(body);
   });
 
@@ -136,21 +147,15 @@ function sendQuery(query) {
     const data = JSON.parse(e.data);
     bodyHtml += data.token;
     const body = assistantWrap.querySelector(".msg-body");
-    if (body) body.innerHTML = renderMarkdown(headerText + bodyHtml);
-    assistantWrap.scrollIntoView({ behavior: "smooth", block: "end" });
+    if (body) body.innerHTML = renderMarkdown(headerText + bodyHtml) + '<span class="cursor-blink"></span>';
+    scrollToBottom();
   });
 
   es.addEventListener("final", (e) => {
     const data = JSON.parse(e.data);
     assistantWrap.innerHTML = "";
 
-    const badge = data.badge;
-    if (badge) {
-      const badgeEl = document.createElement("span");
-      badgeEl.className = `intent-badge ${badgeClass(badge)}`;
-      badgeEl.textContent = badge;
-      assistantWrap.appendChild(badgeEl);
-    }
+    if (data.badge) assistantWrap.insertAdjacentHTML("beforeend", renderBadge(data.badge));
 
     const body = document.createElement("div");
     body.className = "msg-body";
@@ -161,7 +166,7 @@ function sendQuery(query) {
     renderChart(assistantWrap, data.chart);
     renderDownloads(assistantWrap, data.download_id);
 
-    assistantWrap.scrollIntoView({ behavior: "smooth", block: "end" });
+    scrollToBottom();
     es.close();
   });
 
@@ -170,17 +175,38 @@ function sendQuery(query) {
     try {
       message = JSON.parse(e.data).message || message;
     } catch (_) { /* connection-level error, no JSON payload */ }
-    assistantWrap.innerHTML = `<div class="msg-body">⚠️ ${message}</div>`;
+    assistantWrap.innerHTML = `<div class="msg-body">${message}</div>`;
     es.close();
   });
 }
 
+// ── Composer: auto-resize + enable/disable send + Enter-to-send ──
+const chatInput = document.getElementById("chat-input");
+const sendBtn = document.getElementById("send-btn");
+
+function autoResize() {
+  chatInput.style.height = "auto";
+  chatInput.style.height = Math.min(chatInput.scrollHeight, 200) + "px";
+}
+
+chatInput.addEventListener("input", () => {
+  autoResize();
+  sendBtn.disabled = chatInput.value.trim().length === 0;
+});
+
+chatInput.addEventListener("keydown", (e) => {
+  if (e.key === "Enter" && !e.shiftKey) {
+    e.preventDefault();
+    document.getElementById("chat-form").requestSubmit();
+  }
+});
+
 document.getElementById("chat-form").addEventListener("submit", (e) => {
   e.preventDefault();
-  const input = document.getElementById("chat-input");
-  const query = input.value.trim();
+  const query = chatInput.value.trim();
   if (!query) return;
-  input.value = "";
-  document.getElementById("suggestions-box").open = false;
+  chatInput.value = "";
+  autoResize();
+  sendBtn.disabled = true;
   sendQuery(query);
 });
