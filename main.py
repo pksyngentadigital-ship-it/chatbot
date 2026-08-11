@@ -26,7 +26,7 @@ PINECONE_API_KEY = os.getenv("PINECONE_API_KEY")
 SESSION_SECRET = os.getenv("SESSION_SECRET", "dev-only-secret-change-me")
 ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "admin123")
 
-APP_BUILD = "2026-08-10-v6 (multi-turn follow-up support: 'what about wheat?')"
+APP_BUILD = "2026-08-10-v7 (server-side chat history, session-backed follow-up context)"
 
 app = FastAPI(title="Voice of Grower")
 app.add_middleware(SessionMiddleware, secret_key=SESSION_SECRET)
@@ -60,15 +60,57 @@ def _sse(event: str, data: dict) -> str:
     return f"event: {event}\ndata: {json.dumps(data)}\n\n"
 
 
+# ── In-memory session store: chat history + follow-up context ──
+# The Starlette session cookie itself only holds a small opaque "sid" —
+# actual conversation content lives here server-side, keyed by that id.
+# (Keeping full message text in the signed cookie would blow past the
+# ~4KB cookie size limit within a few turns.) Same single-process caveat
+# as the download store: a multi-instance deployment would need Redis.
+_SESSION_STORE: dict[str, dict] = {}
+_SESSION_ORDER: list[str] = []
+_MAX_SESSIONS = 500
+_MAX_HISTORY_PER_SESSION = 60
+
+
+def _get_sid(request: Request) -> str:
+    sid = request.session.get("sid")
+    if not sid:
+        sid = uuid.uuid4().hex
+        request.session["sid"] = sid
+    return sid
+
+
+def _get_session_data(sid: str) -> dict:
+    if sid not in _SESSION_STORE:
+        if len(_SESSION_ORDER) >= _MAX_SESSIONS:
+            oldest = _SESSION_ORDER.pop(0)
+            _SESSION_STORE.pop(oldest, None)
+        _SESSION_ORDER.append(sid)
+        _SESSION_STORE[sid] = {"history": [], "prior_context": None}
+    return _SESSION_STORE[sid]
+
+
+def _append_history(session_data: dict, entry: dict):
+    session_data["history"].append(entry)
+    if len(session_data["history"]) > _MAX_HISTORY_PER_SESSION:
+        session_data["history"] = session_data["history"][-_MAX_HISTORY_PER_SESSION:]
+
+
 # ==========================================
 # PAGES
 # ==========================================
 
 @app.get("/", response_class=HTMLResponse)
 def chat_page(request: Request):
+    sid = _get_sid(request)
+    session_data = _get_session_data(sid)
+    # Guard against a stray "</script>" in stored user/assistant text breaking
+    # out of the inline script tag it's embedded in below.
+    history_json = json.dumps(session_data["history"]).replace("</", "<\\/")
     return templates.TemplateResponse(request, "chat.html", {
         "suggested_prompts": vog_core.SUGGESTED_PROMPTS,
         "app_build": APP_BUILD,
+        "history_json": history_json,
     })
 
 
@@ -121,16 +163,13 @@ async def admin_ingest(request: Request, file: UploadFile = File(...)):
 # ==========================================
 
 @app.get("/chat")
-def chat(q: str, ctx: str = ""):
-    """ Streams the answer as Server-Sent Events. Event types: - "start": {badge, header} — sent once, right before token streaming begins (kind="normal" only). - "token": {token} — one LLM token at a time. - "final": {kind, badge, header, reply|full_response, chart, download_id, context} — always the last event; frontend renders the finished bubble + chart + download links from this, and stashes "context" client-side to send back as `ctx` on the next request (multi-turn follow-up support — see vog_core.detect_followup_reference). - "error": {message} `ctx` is a JSON object {"product","crop","intent"} the client got from the previous turn's "final" event; malformed/missing ctx is treated as "no prior context" rather than an error. """
-    prior_context = None
-    if ctx:
-        try:
-            parsed = json.loads(ctx)
-            if isinstance(parsed, dict):
-                prior_context = parsed
-        except (json.JSONDecodeError, TypeError):
-            prior_context = None
+def chat(request: Request, q: str):
+    """ Streams the answer as Server-Sent Events. Event types: - "start": {badge, header} — sent once, right before token streaming begins (kind="normal" only). - "token": {token} — one LLM token at a time. - "final": {kind, badge, header, reply|full_response, chart, download_id} — always the last event; frontend renders the finished bubble + chart + download links from this. - "error": {message} Follow-up context (see vog_core.detect_followup_reference) and full chat history are both kept server-side per session — nothing round-trips through the client beyond the query text itself, so a page refresh doesn't lose either. """
+    sid = _get_sid(request)
+    session_data = _get_session_data(sid)
+    prior_context = session_data.get("prior_context")
+
+    _append_history(session_data, {"role": "user", "content": q})
 
     def event_stream():
         try:
@@ -142,19 +181,29 @@ def chat(q: str, ctx: str = ""):
         kind = state["kind"]
 
         if kind in ("blocked", "no_key", "no_data"):
+            if "context" in state:
+                session_data["prior_context"] = state["context"]
+            _append_history(session_data, {
+                "role": "assistant", "kind": kind, "badge": None,
+                "content": state["reply"], "chart": None, "download_id": None,
+            })
             yield _sse("final", {
                 "kind": kind, "badge": None, "header": "",
                 "reply": state["reply"], "chart": None, "download_id": None,
-                "context": state.get("context"),
             })
             return
 
         if kind in ("ranking", "trend"):
             download_id = _store_downloads(state.get("downloads"))
+            _append_history(session_data, {
+                "role": "assistant", "kind": kind, "badge": state.get("badge"),
+                "content": state["reply"], "chart": state.get("chart"),
+                "download_id": download_id,
+            })
             yield _sse("final", {
                 "kind": kind, "badge": state.get("badge"), "header": "",
                 "reply": state["reply"], "chart": state.get("chart"),
-                "download_id": download_id, "context": None,
+                "download_id": download_id,
             })
             return
 
@@ -180,16 +229,30 @@ def chat(q: str, ctx: str = ""):
 
         result = vog_core.finalize_normal_response(state, full_response)
         download_id = _store_downloads(result["downloads"])
+        if "context" in state:
+            session_data["prior_context"] = state["context"]
+        _append_history(session_data, {
+            "role": "assistant", "kind": "normal", "badge": badge,
+            "content": header + full_response, "chart": result["chart"],
+            "download_id": download_id,
+        })
         yield _sse("final", {
             "kind": "normal", "badge": badge, "header": header,
             "reply": full_response, "chart": result["chart"],
-            "download_id": download_id, "context": state.get("context"),
+            "download_id": download_id,
         })
 
     return StreamingResponse(event_stream(), media_type="text/event-stream", headers={
         "Cache-Control": "no-cache",
         "X-Accel-Buffering": "no",
     })
+
+
+@app.post("/chat/clear")
+def chat_clear(request: Request):
+    sid = _get_sid(request)
+    _SESSION_STORE[sid] = {"history": [], "prior_context": None}
+    return {"success": True}
 
 
 # ==========================================

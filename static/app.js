@@ -31,13 +31,6 @@ function collapseWelcome() {
   if (welcome) welcome.classList.add("collapsed");
 }
 
-// ── Multi-turn follow-up support: the "context" (product/crop/intent) the
-// server resolved for the previous turn, sent back on the next request so
-// "what about wheat?" can inherit the earlier product/intent. Reset on New
-// chat. Preserved (not cleared) across ranking/no-data turns, which don't
-// return a fresh context, so a correction still has something to fall back on. ──
-let priorContext = null;
-
 // ── Sidebar: mobile toggle + New chat ──
 const sidebar = document.getElementById("sidebar");
 const sidebarScrim = document.getElementById("sidebar-scrim");
@@ -64,7 +57,9 @@ document.getElementById("new-chat-btn").addEventListener("click", () => {
   if (welcome) welcome.classList.remove("collapsed");
   closeSidebar();
   chatInputFocus();
-  priorContext = null;
+  // Fire-and-forget: clears server-side history + follow-up context for
+  // this session. Nothing in the UI depends on the response.
+  fetch("/chat/clear", { method: "POST" }).catch(() => {});
 });
 
 function chatInputFocus() {
@@ -172,8 +167,7 @@ function sendQuery(query) {
   let bodyHtml = "";
   let headerText = "";
 
-  const ctxParam = priorContext ? `&ctx=${encodeURIComponent(JSON.stringify(priorContext))}` : "";
-  const es = new EventSource(`/chat?q=${encodeURIComponent(query)}${ctxParam}`);
+  const es = new EventSource(`/chat?q=${encodeURIComponent(query)}`);
 
   es.addEventListener("start", (e) => {
     const data = JSON.parse(e.data);
@@ -208,8 +202,6 @@ function sendQuery(query) {
 
     renderChart(assistantWrap, data.chart);
     renderDownloads(assistantWrap, data.download_id);
-
-    if (data.context) priorContext = data.context;
 
     scrollToBottom();
     es.close();
@@ -255,3 +247,39 @@ document.getElementById("chat-form").addEventListener("submit", (e) => {
   sendBtn.disabled = true;
   sendQuery(query);
 });
+
+// ── Restore server-side chat history on page load, so a refresh doesn't
+// lose the conversation. Reuses the same render helpers as live turns. ──
+(function hydrateHistory() {
+  const history = window.__initialHistory;
+  if (!Array.isArray(history) || history.length === 0) return;
+
+  collapseWelcome();
+  const log = document.getElementById("chat-log");
+
+  history.forEach((entry) => {
+    if (entry.role === "user") {
+      const div = document.createElement("div");
+      div.className = "msg user";
+      const body = document.createElement("div");
+      body.className = "msg-body";
+      body.textContent = entry.content;
+      div.appendChild(body);
+      log.appendChild(div);
+      return;
+    }
+
+    const wrap = document.createElement("div");
+    wrap.className = "msg assistant";
+    if (entry.badge) wrap.insertAdjacentHTML("beforeend", renderBadge(entry.badge));
+    const body = document.createElement("div");
+    body.className = "msg-body";
+    body.innerHTML = renderMarkdown(entry.content || "");
+    wrap.appendChild(body);
+    renderChart(wrap, entry.chart);
+    renderDownloads(wrap, entry.download_id);
+    log.appendChild(wrap);
+  });
+
+  scrollToBottom();
+})();
