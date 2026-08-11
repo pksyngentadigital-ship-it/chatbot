@@ -22,12 +22,46 @@ function renderBadge(badgeText) {
 }
 
 function scrollToBottom() {
-  window.scrollTo({ top: document.body.scrollHeight, behavior: "smooth" });
+  const area = document.getElementById("scroll-area");
+  if (area) area.scrollTo({ top: area.scrollHeight, behavior: "smooth" });
 }
 
 function collapseWelcome() {
   const welcome = document.getElementById("welcome");
   if (welcome) welcome.classList.add("collapsed");
+}
+
+// ── Sidebar: mobile toggle + New chat ──
+const sidebar = document.getElementById("sidebar");
+const sidebarScrim = document.getElementById("sidebar-scrim");
+const sidebarToggle = document.getElementById("sidebar-toggle");
+
+function closeSidebar() {
+  sidebar.classList.remove("open");
+  sidebarScrim.classList.remove("open");
+}
+
+if (sidebarToggle) {
+  sidebarToggle.addEventListener("click", () => {
+    sidebar.classList.add("open");
+    sidebarScrim.classList.add("open");
+  });
+}
+if (sidebarScrim) {
+  sidebarScrim.addEventListener("click", closeSidebar);
+}
+
+document.getElementById("new-chat-btn").addEventListener("click", () => {
+  document.getElementById("chat-log").innerHTML = "";
+  const welcome = document.getElementById("welcome");
+  if (welcome) welcome.classList.remove("collapsed");
+  closeSidebar();
+  chatInputFocus();
+});
+
+function chatInputFocus() {
+  const el = document.getElementById("chat-input");
+  if (el) el.focus();
 }
 
 function addUserMessage(text) {
