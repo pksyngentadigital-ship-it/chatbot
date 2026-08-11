@@ -190,7 +190,8 @@ PRODUCT_STOPWORDS = {
     "quickly", "brief", "detail", "details", "info", "information", "one",
     "two", "three", "four", "five", "recent", "latest", "last", "current",
     "previous", "next", "prior", "season", "seasons", "compared", "across",
-    "during", "within", "improved"
+    "during", "within", "improved", "day", "days", "reported", "report",
+    "reports", "generated", "received", "found", "total", "number", "numbers"
 } | set(MONTH_MAP.keys()) | set(BUSINESS_KEYWORDS) | set(DISEASE_PEST_TERMS)
 
 ALLOWED_GUARDRAIL_KEYWORDS = set([
