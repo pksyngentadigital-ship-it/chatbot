@@ -108,7 +108,7 @@ def chat_page(request: Request):
     # out of the inline script tag it's embedded in below.
     history_json = json.dumps(session_data["history"]).replace("</", "<\\/")
     return templates.TemplateResponse(request, "chat.html", {
-        "suggested_prompts": vog_core.SUGGESTED_PROMPTS,
+        "suggested_prompts": vog_core.SUGGESTED_PROMPTS_QUICK,
         "app_build": APP_BUILD,
         "history_json": history_json,
     })

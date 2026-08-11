@@ -274,6 +274,19 @@ SUGGESTED_PROMPTS = {
     ],
 }
 
+# A short, curated subset of SUGGESTED_PROMPTS shown on the FastAPI chat
+# UI's welcome screen — one high-value prompt per major use case, so first-
+# time users see a handful of clear options instead of the full category
+# grid. (The Streamlit app still uses the full SUGGESTED_PROMPTS above.)
+SUGGESTED_PROMPTS_QUICK = [
+    "What are the top 10 grower concerns reported during the last 30 days?",
+    "Which Syngenta products received the highest positive feedback?",
+    "Show overall grower sentiment by month.",
+    "What are the most common product improvement recommendations?",
+    "Which crop generated the highest number of complaints?",
+    "Summarize the major grower insights for the last quarter in one page.",
+]
+
 # ==========================================
 # UTILITIES
 # ==========================================

@@ -206,33 +206,12 @@ button { font-family: inherit; }
 }
 
 /* ── Suggested prompts ── */
-.suggestions { width: 100%; max-width: 680px; }
-.tab-bar {
-  display: flex;
-  gap: 0.4rem;
-  overflow-x: auto;
-  padding-bottom: 0.9rem;
-  margin-bottom: 1rem;
-  justify-content: center;
-  flex-wrap: wrap;
+.suggestions { width: 100%; max-width: 560px; }
+.prompt-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0.6rem;
 }
-.tab-btn {
-  border: 1px solid var(--border);
-  background: var(--bg);
-  color: var(--text-muted);
-  padding: 0.42rem 0.9rem;
-  border-radius: 999px;
-  font-size: 0.82rem;
-  font-weight: 500;
-  cursor: pointer;
-  white-space: nowrap;
-  transition: all 0.15s;
-}
-.tab-btn:hover { background: var(--bg-hover); color: var(--text); }
-.tab-btn.active { background: var(--accent); color: var(--accent-text); border-color: var(--accent); }
-
-.tab-panel { display: none; grid-template-columns: 1fr 1fr; gap: 0.6rem; }
-.tab-panel.active { display: grid; }
 .prompt-card {
   text-align: left;
   border: 1px solid var(--border);
@@ -249,7 +228,7 @@ button { font-family: inherit; }
 .prompt-card:hover { background: var(--bg-raised); border-color: var(--text-faint); transform: translateY(-1px); box-shadow: var(--shadow-lg); }
 
 @media (max-width: 640px) {
-  .tab-panel { grid-template-columns: 1fr; }
+  .prompt-grid { grid-template-columns: 1fr; }
 }
 
 /* ── Chat log ── */

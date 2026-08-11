@@ -47,18 +47,11 @@
             <p class="welcome-sub">Ask about sentiment, complaints, products, crops, or trends — grounded entirely in your grower feedback data.</p>
 
             <div class="suggestions" id="suggestions-box">
-              <div class="tab-bar" id="tab-bar">
-                {% for category in suggested_prompts.keys() %}
-                <button class="tab-btn{% if loop.first %} active{% endif %}" data-tab="tab-{{ loop.index }}" type="button">{{ category }}</button>
-                {% endfor %}
-              </div>
-              {% for category, prompts in suggested_prompts.items() %}
-              <div class="tab-panel{% if loop.first %} active{% endif %}" id="tab-{{ loop.index }}">
-                {% for prompt in prompts %}
+              <div class="prompt-grid">
+                {% for prompt in suggested_prompts %}
                 <button class="prompt-card" type="button">{{ prompt }}</button>
                 {% endfor %}
               </div>
-              {% endfor %}
             </div>
           </section>
 
