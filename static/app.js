@@ -7,9 +7,15 @@ document.querySelectorAll(".prompt-card").forEach((btn) => {
 });
 
 // ── Badge label (mirrors the Streamlit build's badge text, minimal style) ──
-function renderBadge(badgeText) {
-  if (!badgeText) return "";
-  return `<span class="badge">${badgeText}</span>`;
+// Built as a node with textContent rather than an HTML string: badge text is
+// assembled server-side from data-derived labels, so it should never be
+// parsed as markup.
+function appendBadge(container, badgeText) {
+  if (!badgeText) return;
+  const span = document.createElement("span");
+  span.className = "badge";
+  span.textContent = badgeText;
+  container.appendChild(span);
 }
 
 function scrollToBottom() {
@@ -84,12 +90,29 @@ function addAssistantMessage() {
   return wrap;
 }
 
+// Assistant text is model output, and the model is instructed to quote the
+// ingested spreadsheet verbatim — so it is untrusted input, not trusted
+// markup. Everything goes through DOMPurify before it reaches innerHTML.
 function renderMarkdown(text) {
+  let html;
   try {
-    return marked.parse(text);
+    html = marked.parse(text);
   } catch (e) {
-    return text.replace(/\n/g, "<br>");
+    html = String(text).replace(/\n/g, "<br>");
   }
+  try {
+    return DOMPurify.sanitize(html, { USE_PROFILES: { html: true } });
+  } catch (e) {
+    // If the sanitizer is unavailable for any reason, degrade to plain
+    // text rather than rendering unsanitized HTML.
+    const div = document.createElement("div");
+    div.textContent = text;
+    return div.innerHTML;
+  }
+}
+
+function setMarkdown(el, text) {
+  el.innerHTML = renderMarkdown(text);
 }
 
 function renderChart(container, chart) {
@@ -165,21 +188,51 @@ function renderSuggestions(container, suggestions) {
   container.appendChild(wrap);
 }
 
+// Only one turn may be in flight. Two concurrent streams interleave their
+// writes into the same server-side history and follow-up context, which
+// silently corrupts the conversation.
+let inFlight = null;
+
+function setBusy(busy) {
+  const stopBtn = document.getElementById("stop-btn");
+  if (stopBtn) stopBtn.hidden = !busy;
+  if (sendBtn) sendBtn.disabled = busy || chatInput.value.trim().length === 0;
+}
+
+function stopStreaming() {
+  if (inFlight) {
+    inFlight.close();
+    inFlight = null;
+  }
+  setBusy(false);
+}
+
 function sendQuery(query) {
+  if (inFlight) return;  // a turn is already streaming
+
   collapseWelcome();
   addUserMessage(query);
   const assistantWrap = addAssistantMessage();
 
-  let bodyHtml = "";
+  let bodyText = "";
   let headerText = "";
+  let repaintQueued = false;
 
   const es = new EventSource(`/chat?q=${encodeURIComponent(query)}`);
+  inFlight = es;
+  setBusy(true);
+
+  function finish() {
+    if (inFlight === es) inFlight = null;
+    es.close();
+    setBusy(false);
+  }
 
   es.addEventListener("start", (e) => {
     const data = JSON.parse(e.data);
     headerText = data.header || "";
     assistantWrap.innerHTML = "";
-    if (data.badge) assistantWrap.insertAdjacentHTML("beforeend", renderBadge(data.badge));
+    appendBadge(assistantWrap, data.badge);
     const body = document.createElement("div");
     body.className = "msg-body";
     body.innerHTML = '<span class="cursor-blink"></span>';
@@ -187,23 +240,30 @@ function sendQuery(query) {
   });
 
   es.addEventListener("token", (e) => {
-    const data = JSON.parse(e.data);
-    bodyHtml += data.token;
-    const body = assistantWrap.querySelector(".msg-body");
-    if (body) body.innerHTML = renderMarkdown(headerText + bodyHtml) + '<span class="cursor-blink"></span>';
-    scrollToBottom();
+    bodyText += JSON.parse(e.data).token;
+    // Re-parsing the whole markdown string on every token is O(n^2) and
+    // visibly janks long answers — coalesce to one repaint per frame.
+    if (repaintQueued) return;
+    repaintQueued = true;
+    requestAnimationFrame(() => {
+      repaintQueued = false;
+      const body = assistantWrap.querySelector(".msg-body");
+      if (body) {
+        setMarkdown(body, headerText + bodyText);
+        body.insertAdjacentHTML("beforeend", '<span class="cursor-blink"></span>');
+      }
+      scrollToBottom();
+    });
   });
 
   es.addEventListener("final", (e) => {
     const data = JSON.parse(e.data);
     assistantWrap.innerHTML = "";
-
-    if (data.badge) assistantWrap.insertAdjacentHTML("beforeend", renderBadge(data.badge));
+    appendBadge(assistantWrap, data.badge);
 
     const body = document.createElement("div");
     body.className = "msg-body";
-    const text = data.kind === "normal" ? (data.header || "") + data.reply : data.reply;
-    body.innerHTML = renderMarkdown(text);
+    setMarkdown(body, data.kind === "normal" ? (data.header || "") + data.reply : data.reply);
     assistantWrap.appendChild(body);
 
     renderChart(assistantWrap, data.chart);
@@ -211,7 +271,7 @@ function sendQuery(query) {
     renderSuggestions(assistantWrap, data.suggestions);
 
     scrollToBottom();
-    es.close();
+    finish();
   });
 
   es.addEventListener("error", (e) => {
@@ -219,8 +279,18 @@ function sendQuery(query) {
     try {
       message = JSON.parse(e.data).message || message;
     } catch (_) { /* connection-level error, no JSON payload */ }
-    assistantWrap.innerHTML = `<div class="msg-body">${message}</div>`;
-    es.close();
+
+    // Append below whatever already streamed rather than replacing it —
+    // discarding a partial answer the user was mid-way through reading is
+    // worse than showing it with a note attached.
+    const note = document.createElement("div");
+    note.className = "msg-error";
+    note.textContent = message;
+    const cursor = assistantWrap.querySelector(".cursor-blink");
+    if (cursor) cursor.remove();
+    assistantWrap.appendChild(note);
+    scrollToBottom();
+    finish();
   });
 }
 
@@ -235,7 +305,7 @@ function autoResize() {
 
 chatInput.addEventListener("input", () => {
   autoResize();
-  sendBtn.disabled = chatInput.value.trim().length === 0;
+  sendBtn.disabled = !!inFlight || chatInput.value.trim().length === 0;
 });
 
 chatInput.addEventListener("keydown", (e) => {
@@ -245,20 +315,34 @@ chatInput.addEventListener("keydown", (e) => {
   }
 });
 
+chatInput.setAttribute("maxlength", "500");
+
 document.getElementById("chat-form").addEventListener("submit", (e) => {
   e.preventDefault();
+  if (inFlight) return;
   const query = chatInput.value.trim();
   if (!query) return;
   chatInput.value = "";
   autoResize();
-  sendBtn.disabled = true;
   sendQuery(query);
 });
+
+const stopBtnEl = document.getElementById("stop-btn");
+if (stopBtnEl) stopBtnEl.addEventListener("click", stopStreaming);
 
 // ── Restore server-side chat history on page load, so a refresh doesn't
 // lose the conversation. Reuses the same render helpers as live turns. ──
 (function hydrateHistory() {
-  const history = window.__initialHistory;
+  let history = [];
+  try {
+    // Read from a JSON data island rather than an inline assignment — in
+    // application/json the parser only looks for "</script", so stored
+    // text cannot confuse the tokenizer and break the page.
+    const el = document.getElementById("init-history");
+    if (el) history = JSON.parse(el.textContent || "[]");
+  } catch (e) {
+    history = [];
+  }
   if (!Array.isArray(history) || history.length === 0) return;
 
   collapseWelcome();
@@ -278,10 +362,10 @@ document.getElementById("chat-form").addEventListener("submit", (e) => {
 
     const wrap = document.createElement("div");
     wrap.className = "msg assistant";
-    if (entry.badge) wrap.insertAdjacentHTML("beforeend", renderBadge(entry.badge));
+    appendBadge(wrap, entry.badge);
     const body = document.createElement("div");
     body.className = "msg-body";
-    body.innerHTML = renderMarkdown(entry.content || "");
+    setMarkdown(body, entry.content || "");
     wrap.appendChild(body);
     renderChart(wrap, entry.chart);
     renderDownloads(wrap, entry.download_id);

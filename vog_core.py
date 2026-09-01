@@ -700,38 +700,70 @@ def detect_product_known(query_lower: str) -> str | None:
     return None
 
 
-def detect_product_dynamic(query_lower: str, index, pc) -> str | None:
-    """ Fallback path for products NOT in PRODUCT_LIST. Pulls candidate word(s) out of the query (skipping common/sentiment/month/filler words), then checks a targeted Pinecone probe — embedding the candidate itself, not the user's raw question — to see if it genuinely appears inside the ingested feedback text. Using a dedicated embedding per candidate (rather than reusing the original query's embedding) means detection no longer depends on how the question happens to be phrased: "tell me about X" and "give me feedback of X" now behave identically. Multi-word product names (e.g. "Naya Potash") are tried as a full phrase first, then as individual words as a fallback. """
-    candidates = [
-        w for w in re.findall(r'\b[a-zA-Z]{3,}\b', query_lower)
-        if w not in PRODUCT_STOPWORDS
-    ]
+# A candidate must look like a brand rather than an ordinary word before it
+# is worth probing at all, and it must then be corroborated by the curated
+# `products` metadata tag rather than by appearing anywhere in free text.
+MAX_DYNAMIC_CANDIDATES = 3
+MAX_QUERY_WORDS_FOR_PROBE = 30
+MIN_PRODUCT_TAG_HITS = 2
+
+
+def _dynamic_candidates(query_lower: str, original_query: str) -> list[str]:
+    """Candidate ordering for the dynamic probe: longest first (a brand name
+    is usually the most distinctive token in the sentence), and capitalized-
+    in-the-original tokens preferred, since real product names are written
+    as proper nouns. Deliberately NOT query order — that made a leading verb
+    like "provided" outrank the actual product name."""
+    words = re.findall(r'\b[a-zA-Z]{4,}\b', query_lower)
+    seen, cands = set(), []
+    capitalized = {w.lower() for w in re.findall(r'\b[A-Z][a-zA-Z]{3,}\b', original_query)}
+    for w in words:
+        if w in PRODUCT_STOPWORDS or w in seen:
+            continue
+        seen.add(w)
+        cands.append(w)
+    cands.sort(key=lambda w: (w in capitalized, len(w)), reverse=True)
+    return cands
+
+
+def detect_product_dynamic(query_lower: str, index, pc, original_query: str = "") -> str | None:
+    """ Fallback path for products NOT in PRODUCT_LIST. Confirms a candidate against the curated `products` metadata tag written at ingestion — NOT against raw feedback text. The old substring-in-free-text test confirmed almost any common English word, because in a corpus made entirely of grower feedback nearly every word appears somewhere; that produced a steady stream of false products ("other", "pricing", "delayed", "farmers", and — from the app's own suggested prompts — "provided" and "past"). Also bounded: at most MAX_DYNAMIC_CANDIDATES probes, skipped entirely for long queries, and all candidate embeddings requested in ONE batched call rather than one round trip per word. """
+    if not query_lower.strip():
+        return None
+    # A long query is prose, not a product lookup — and probing it used to
+    # mean one embedding call plus one vector query per word.
+    if len(re.findall(r'\b\w+\b', query_lower)) > MAX_QUERY_WORDS_FOR_PROBE:
+        return None
+
+    candidates = _dynamic_candidates(query_lower, original_query or query_lower)[:MAX_DYNAMIC_CANDIDATES]
     if not candidates:
         return None
 
-    # Try the full multi-word phrase first (handles "Naya Potash"-style names),
-    # then fall back to individual candidate words.
-    ordered_candidates = []
-    if len(candidates) >= 2:
-        ordered_candidates.append(" ".join(candidates))
-    ordered_candidates.extend(candidates)
+    try:
+        embed_response = pc.inference.embed(
+            model="llama-text-embed-v2",
+            inputs=[f"{c} product feedback sentiment" for c in candidates],
+            parameters={"input_type": "query", "dimension": EMBEDDING_DIMENSION}
+        )
+        vectors = [item.values for item in embed_response]
+    except Exception:
+        return None
 
-    for cand in ordered_candidates:
+    for cand, vector in zip(candidates, vectors):
         try:
-            probe_embed = pc.inference.embed(
-                model="llama-text-embed-v2",
-                inputs=[f"{cand} product feedback sentiment"],
-                parameters={"input_type": "query", "dimension": EMBEDDING_DIMENSION}
-            )
-            probe_vector = probe_embed[0].values
-            probe = index.query(vector=probe_vector, top_k=50, include_metadata=True)
-            blob = " ".join(
-                str(m.get("metadata", {}).get("value", "")) for m in probe.get("matches", [])
-            ).lower()
+            probe = index.query(vector=vector, top_k=50, include_metadata=True)
         except Exception:
             continue
 
-        if cand.lower() in blob:
+        # Corroborate against the curated product tag, with a word-boundary
+        # match and a minimum hit count — a genuine product name dominates
+        # its own probe; a common word shows up diffusely or not at all.
+        pattern = re.compile(r'(?:^|,)\s*' + re.escape(cand) + r'\s*(?:,|$)', re.IGNORECASE)
+        hits = sum(
+            1 for m in probe.get("matches", [])
+            if pattern.search(str(m.get("metadata", {}).get("products", "")))
+        )
+        if hits >= MIN_PRODUCT_TAG_HITS:
             return cand
     return None
 
@@ -1798,7 +1830,7 @@ def process_chat_query(user_query: str, pinecone_api_key: str, groq_api_key: str
 
     active_product = detect_product_known(query_lower)
     if not active_product:
-        active_product = detect_product_dynamic(query_lower, index, pc)
+        active_product = detect_product_dynamic(query_lower, index, pc, original_query=user_query)
     active_crop = detect_crop(query_lower)
     if active_product and active_crop and active_product.lower() == active_crop.lower():
         active_product = None

@@ -2,58 +2,151 @@
 Voice of Grower — FastAPI + lightweight HTML/JS frontend.
 
 Same-origin app: this process serves both the API and the UI (Jinja2 shell
-+ vanilla JS + Chart.js from a CDN), so there's no CORS to configure and
-no JS build step. All business logic lives in vog_core.py — this file is
-purely the web-framework glue (routing, sessions, streaming, downloads).
++ vanilla JS, with Chart.js/marked/DOMPurify vendored under static/vendor
+so there is no CDN dependency and the CSP can stay strict). All business
+logic lives in vog_core.py — this file is purely the web-framework glue
+(routing, sessions, streaming, downloads).
 """
 
 import datetime
+import hmac
 import json
+import logging
 import os
+import secrets
+import time
 import uuid
+from collections import OrderedDict, deque
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi.responses import HTMLResponse, RedirectResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
+from starlette.concurrency import run_in_threadpool
 from starlette.middleware.sessions import SessionMiddleware
 
+import shared_state
 import vog_core
 
+log = logging.getLogger("vog")
 load_dotenv()
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 PINECONE_API_KEY = os.getenv("PINECONE_API_KEY")
-SESSION_SECRET = os.getenv("SESSION_SECRET", "dev-only-secret-change-me")
-ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "admin123")
 
-APP_BUILD = "2026-09-01-v9 (gpt-oss-20b model, live-QA fixes for pricing/delayed false-positives)"
+# ── Credentials: fail SAFE, never fail open ──
+# Previously these fell back to literals committed to a public repo
+# ("dev-only-secret-change-me" / "admin123"), so a missing or mistyped env
+# var silently booted a publicly-known password. Crashing on boot would be
+# the textbook fix, but it turns a config slip into an outage for a live
+# service — so instead: an unset session secret gets a random per-process
+# value (sessions simply don't survive a restart, which is already true of
+# every other piece of state here), and an unset admin password disables
+# admin login outright rather than accepting a guessable default.
+SESSION_SECRET = os.getenv("SESSION_SECRET") or secrets.token_urlsafe(48)
+if not os.getenv("SESSION_SECRET"):
+    log.warning("SESSION_SECRET unset — using a random per-process secret; sessions will not survive a restart.")
+
+ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD")
+ADMIN_ENABLED = bool(ADMIN_PASSWORD)
+if not ADMIN_ENABLED:
+    log.warning("ADMIN_PASSWORD unset — the admin panel is DISABLED for this process.")
+
+MAX_QUERY_CHARS = 500
+MAX_UPLOAD_BYTES = 10 * 1024 * 1024  # 10 MB
+
+APP_BUILD = "2026-09-02-v10 (hardening: fail-safe creds, rate limits, sanitized render, vendored assets)"
 
 app = FastAPI(title="Voice of Grower")
-app.add_middleware(SessionMiddleware, secret_key=SESSION_SECRET)
+app.add_middleware(
+    SessionMiddleware,
+    secret_key=SESSION_SECRET,
+    https_only=True,
+    same_site="lax",
+    max_age=8 * 60 * 60,
+)
 app.mount("/static", StaticFiles(directory="static"), name="static")
 templates = Jinja2Templates(directory="templates")
 
-# ── In-memory download store ──
-# Each finalized chat turn (ranking / trend / normal) may produce CSV/Excel/
-# PPTX bytes. Rather than round-tripping those bytes through the SSE stream
-# as base64 JSON, we stash them here under a short-lived id and hand the
-# browser a plain download link. Fine for a single-process internal tool;
-# a multi-instance deployment would swap this for Redis/S3.
-_DOWNLOAD_STORE: dict[str, dict] = {}
-_DOWNLOAD_ORDER: list[str] = []
+
+# ── Security headers ──
+# The CSP is the backstop for the markdown-render path: even if something
+# slips past DOMPurify, inline/injected script has no origin it may load
+# from. 'unsafe-inline' is still required for style because the templates
+# use a few inline style attributes.
+_CSP = (
+    "default-src 'self'; "
+    "script-src 'self'; "
+    "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; "
+    "font-src 'self' https://fonts.gstatic.com; "
+    "img-src 'self' data:; "
+    "connect-src 'self'; "
+    "base-uri 'none'; "
+    "form-action 'self'; "
+    "frame-ancestors 'none'"
+)
+
+
+@app.middleware("http")
+async def security_headers(request: Request, call_next):
+    response = await call_next(request)
+    response.headers["Content-Security-Policy"] = _CSP
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["Referrer-Policy"] = "same-origin"
+    response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
+    return response
+
+
+# ── Rate limiting ──
+# A single /chat turn can fan out to several paid LLM/embedding calls, and
+# /admin/login is otherwise an unthrottled password oracle. Fixed-window
+# per-IP counters; in-process like everything else here, so they reset on
+# restart — adequate as a cost/abuse brake, not a security boundary.
+_RATE_BUCKETS: dict[str, deque] = {}
+_RATE_RULES = {"chat": (30, 60), "login": (5, 900)}  # (max_hits, window_seconds)
+
+
+def _client_ip(request: Request) -> str:
+    forwarded = request.headers.get("x-forwarded-for", "")
+    if forwarded:
+        return forwarded.split(",")[0].strip()
+    return request.client.host if request.client else "unknown"
+
+
+def _rate_limit(request: Request, rule: str):
+    max_hits, window = _RATE_RULES[rule]
+    key = f"{rule}:{_client_ip(request)}"
+    now = time.monotonic()
+    bucket = _RATE_BUCKETS.setdefault(key, deque())
+    while bucket and now - bucket[0] > window:
+        bucket.popleft()
+    if len(bucket) >= max_hits:
+        raise HTTPException(status_code=429, detail="Too many requests — please wait a moment and try again.")
+    bucket.append(now)
+    if len(_RATE_BUCKETS) > 10_000:  # crude guard against unbounded key growth
+        for k in [k for k, v in _RATE_BUCKETS.items() if not v][:5_000]:
+            _RATE_BUCKETS.pop(k, None)
+
+# ── Download store ──
+# Each finalized chat turn may produce CSV/Excel/PPTX bytes. Rather than
+# round-tripping those through the SSE stream as base64, we stash them here
+# and hand the browser a plain link. Entries are bound to the owning
+# session and expire on a clock, so a leaked link (browser history, proxy
+# logs) is not an indefinite bearer token for someone else's export.
+# Backed by shared_state, so a Redis URL makes this multi-instance-safe.
 _MAX_STORED = 200
+_DOWNLOAD_TTL = 30 * 60  # seconds
 
 
-def _store_downloads(downloads: dict | None) -> str | None:
+def _store_downloads(downloads: dict | None, owner_sid: str) -> str | None:
     if not downloads:
         return None
     download_id = uuid.uuid4().hex
-    _DOWNLOAD_STORE[download_id] = downloads
-    _DOWNLOAD_ORDER.append(download_id)
-    if len(_DOWNLOAD_ORDER) > _MAX_STORED:
-        oldest = _DOWNLOAD_ORDER.pop(0)
-        _DOWNLOAD_STORE.pop(oldest, None)
+    shared_state.put_download(download_id, {
+        "downloads": downloads,
+        "owner": owner_sid,
+        "created": time.time(),
+    }, max_entries=_MAX_STORED)
     return download_id
 
 
@@ -61,16 +154,14 @@ def _sse(event: str, data: dict) -> str:
     return f"event: {event}\ndata: {json.dumps(data)}\n\n"
 
 
-# ── In-memory session store: chat history + follow-up context ──
-# The Starlette session cookie itself only holds a small opaque "sid" —
-# actual conversation content lives here server-side, keyed by that id.
-# (Keeping full message text in the signed cookie would blow past the
-# ~4KB cookie size limit within a few turns.) Same single-process caveat
-# as the download store: a multi-instance deployment would need Redis.
-_SESSION_STORE: dict[str, dict] = {}
-_SESSION_ORDER: list[str] = []
+# ── Session store: chat history + follow-up context ──
+# The signed cookie holds only a small opaque "sid"; conversation content
+# lives server-side (full message text would blow past the ~4KB cookie
+# limit within a few turns). True LRU with a TTL, so the user who has been
+# chatting longest is not the first evicted.
 _MAX_SESSIONS = 500
 _MAX_HISTORY_PER_SESSION = 60
+_SESSION_TTL = 12 * 60 * 60  # seconds
 
 
 def _get_sid(request: Request) -> str:
@@ -82,13 +173,11 @@ def _get_sid(request: Request) -> str:
 
 
 def _get_session_data(sid: str) -> dict:
-    if sid not in _SESSION_STORE:
-        if len(_SESSION_ORDER) >= _MAX_SESSIONS:
-            oldest = _SESSION_ORDER.pop(0)
-            _SESSION_STORE.pop(oldest, None)
-        _SESSION_ORDER.append(sid)
-        _SESSION_STORE[sid] = {"history": [], "prior_context": None}
-    return _SESSION_STORE[sid]
+    return shared_state.get_session(sid, max_entries=_MAX_SESSIONS, ttl=_SESSION_TTL)
+
+
+def _save_session_data(sid: str, data: dict):
+    shared_state.put_session(sid, data, max_entries=_MAX_SESSIONS, ttl=_SESSION_TTL)
 
 
 def _append_history(session_data: dict, entry: dict):
@@ -97,23 +186,14 @@ def _append_history(session_data: dict, entry: dict):
         session_data["history"] = session_data["history"][-_MAX_HISTORY_PER_SESSION:]
 
 
-# ── Flagged feedback log ──
-# When a user corrects the bot ("Kaho is not a product") the chatbot can't
-# safely self-modify shared behavior from one chat message — instead it
-# acknowledges the message and logs it here for a human to actually review,
-# so "I've logged this note" is true rather than a hollow platitude. Same
-# single-process, in-memory caveat as the other stores above.
-_FEEDBACK_LOG: list[dict] = []
 _MAX_FEEDBACK_LOG = 200
 
 
 def _log_feedback(message: str):
-    _FEEDBACK_LOG.append({
+    shared_state.append_feedback({
         "message": message,
-        "timestamp": datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC"),
-    })
-    if len(_FEEDBACK_LOG) > _MAX_FEEDBACK_LOG:
-        _FEEDBACK_LOG.pop(0)
+        "timestamp": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d %H:%M UTC"),
+    }, max_entries=_MAX_FEEDBACK_LOG)
 
 
 # ==========================================
@@ -124,9 +204,11 @@ def _log_feedback(message: str):
 def chat_page(request: Request):
     sid = _get_sid(request)
     session_data = _get_session_data(sid)
-    # Guard against a stray "</script>" in stored user/assistant text breaking
-    # out of the inline script tag it's embedded in below.
-    history_json = json.dumps(session_data["history"]).replace("</", "<\\/")
+    # Escape "<" so nothing in stored text can be parsed as markup inside the
+    # JSON data island — this covers the "<!--<script" script-data-escaped
+    # sequence that a bare "</" replacement misses, which could otherwise
+    # leave the page permanently unable to load its own JS.
+    history_json = json.dumps(session_data["history"]).replace("<", "\\u003c")
     return templates.TemplateResponse(request, "chat.html", {
         "suggested_prompts": vog_core.SUGGESTED_PROMPTS_QUICK,
         "app_build": APP_BUILD,
@@ -141,20 +223,30 @@ def admin_page(request: Request):
         "authenticated": authenticated,
         "error": None,
         "app_build": APP_BUILD,
-        "feedback_log": list(reversed(_FEEDBACK_LOG)) if authenticated else [],
+        "admin_enabled": ADMIN_ENABLED,
+        "feedback_log": shared_state.list_feedback() if authenticated else [],
+        "feedback_durable": shared_state.is_durable(),
     })
 
 
 @app.post("/admin/login", response_class=HTMLResponse)
 def admin_login(request: Request, password: str = Form(...)):
-    if password == ADMIN_PASSWORD:
+    _rate_limit(request, "login")
+    if ADMIN_ENABLED and hmac.compare_digest(password, ADMIN_PASSWORD):
+        # Regenerate the session id on privilege change so a pre-auth
+        # session cannot be fixated into an authenticated one.
+        request.session.clear()
+        request.session["sid"] = uuid.uuid4().hex
         request.session["authenticated"] = True
         return RedirectResponse(url="/admin", status_code=303)
+    log.warning("Failed admin login from %s", _client_ip(request))
     return templates.TemplateResponse(request, "admin.html", {
         "authenticated": False,
-        "error": "Invalid credentials",
+        "error": "Invalid credentials" if ADMIN_ENABLED else "Admin is disabled: ADMIN_PASSWORD is not configured.",
         "app_build": APP_BUILD,
+        "admin_enabled": ADMIN_ENABLED,
         "feedback_log": [],
+        "feedback_durable": shared_state.is_durable(),
     })
 
 
@@ -168,7 +260,7 @@ def admin_logout(request: Request):
 def admin_clear_feedback_log(request: Request):
     if not request.session.get("authenticated"):
         raise HTTPException(status_code=401, detail="Not authenticated")
-    _FEEDBACK_LOG.clear()
+    shared_state.clear_feedback()
     return RedirectResponse(url="/admin", status_code=303)
 
 
@@ -179,34 +271,80 @@ async def admin_ingest(request: Request, file: UploadFile = File(...)):
     if not PINECONE_API_KEY:
         raise HTTPException(status_code=400, detail="Pinecone API key is not configured")
 
-    file_bytes = await file.read()
+    # Read with a hard cap. An .xlsx is a ZIP archive, so an unbounded read
+    # lets a small crafted file expand into an OOM on a 512MB instance.
+    chunks, total = [], 0
+    while True:
+        chunk = await file.read(1024 * 1024)
+        if not chunk:
+            break
+        total += len(chunk)
+        if total > MAX_UPLOAD_BYTES:
+            return Response(
+                content=json.dumps({"success": False, "error": f"File exceeds the {MAX_UPLOAD_BYTES // (1024*1024)}MB limit."}),
+                status_code=413, media_type="application/json")
+        chunks.append(chunk)
+    file_bytes = b"".join(chunks)
+
     try:
-        result = vog_core.run_ingestion(file_bytes, PINECONE_API_KEY)
-        return {"success": True, "total_records": result["total_records"]}
+        # run_ingestion is fully synchronous and can run for minutes. Called
+        # directly from an async handler it would block the event loop and
+        # take the whole server down (including /health, which makes Render
+        # restart the instance mid-upload).
+        result = await run_in_threadpool(vog_core.run_ingestion, file_bytes, PINECONE_API_KEY)
+        return {
+            "success": True,
+            "total_records": result["total_records"],
+            "skipped": result.get("skipped", []),
+        }
     except ValueError as e:
         return Response(content=json.dumps({"success": False, "error": str(e)}), status_code=400, media_type="application/json")
     except Exception as e:
-        return Response(content=json.dumps({"success": False, "error": str(e)}), status_code=500, media_type="application/json")
+        ref = uuid.uuid4().hex[:8]
+        log.exception("Ingestion failed [ref=%s]", ref)
+        return Response(
+            content=json.dumps({"success": False, "error": f"Ingestion failed unexpectedly (ref {ref}). Check server logs."}),
+            status_code=500, media_type="application/json")
 
 
 # ==========================================
 # CHAT (Server-Sent Events)
 # ==========================================
 
+def _user_error(exc: Exception, what: str) -> str:
+    """Log the real exception, hand the user a reference id. Provider SDK
+    exceptions embed index hostnames, request ids and quota details, so
+    str(e) must never reach the browser."""
+    ref = uuid.uuid4().hex[:8]
+    log.exception("%s [ref=%s]", what, ref)
+    return f"{what} (ref {ref}). Please try again — if it persists, share this reference with the team."
+
+
 @app.get("/chat")
-def chat(request: Request, q: str):
+def chat(request: Request, q: str = Query(..., min_length=1, max_length=MAX_QUERY_CHARS)):
     """ Streams the answer as Server-Sent Events. Event types: - "start": {badge, header} — sent once, right before token streaming begins (kind="normal" only). - "token": {token} — one LLM token at a time. - "final": {kind, badge, header, reply|full_response, chart, download_id} — always the last event; frontend renders the finished bubble + chart + download links from this. - "error": {message} Follow-up context (see vog_core.detect_followup_reference) and full chat history are both kept server-side per session — nothing round-trips through the client beyond the query text itself, so a page refresh doesn't lose either. """
+    _rate_limit(request, "chat")
+    if not q.strip():
+        raise HTTPException(status_code=400, detail="Query cannot be empty.")
+
     sid = _get_sid(request)
     session_data = _get_session_data(sid)
     prior_context = session_data.get("prior_context")
 
     _append_history(session_data, {"role": "user", "content": q})
+    _save_session_data(sid, session_data)
 
     def event_stream():
+        # Open the socket immediately. The pipeline below can take many
+        # seconds before the first token, and a silent socket gets closed
+        # by the proxy — which surfaces to the user as a generic failure
+        # while the server keeps working and keeps spending.
+        yield _sse("status", {"state": "working"})
+
         try:
             state = vog_core.process_chat_query(q, PINECONE_API_KEY, GROQ_API_KEY, prior_context=prior_context)
         except Exception as e:
-            yield _sse("error", {"message": str(e)})
+            yield _sse("error", {"message": _user_error(e, "Could not process that question")})
             return
 
         kind = state["kind"]
@@ -221,6 +359,7 @@ def chat(request: Request, q: str):
                 "role": "assistant", "kind": kind, "badge": None,
                 "content": state["reply"], "chart": None, "download_id": None,
             })
+            _save_session_data(sid, session_data)
             yield _sse("final", {
                 "kind": kind, "badge": None, "header": "",
                 "reply": state["reply"], "chart": None, "download_id": None,
@@ -228,12 +367,13 @@ def chat(request: Request, q: str):
             return
 
         if kind in ("ranking", "trend"):
-            download_id = _store_downloads(state.get("downloads"))
+            download_id = _store_downloads(state.get("downloads"), sid)
             _append_history(session_data, {
                 "role": "assistant", "kind": kind, "badge": state.get("badge"),
                 "content": state["reply"], "chart": state.get("chart"),
                 "download_id": download_id,
             })
+            _save_session_data(sid, session_data)
             yield _sse("final", {
                 "kind": kind, "badge": state.get("badge"), "header": "",
                 "reply": state["reply"], "chart": state.get("chart"),
@@ -247,6 +387,8 @@ def chat(request: Request, q: str):
         yield _sse("start", {"badge": badge, "header": header})
 
         full_response = ""
+        stream = None
+        llm_failed = False
         try:
             stream = vog_core.call_groq(
                 state["system_prompt"], state["user_prompt"], GROQ_API_KEY,
@@ -258,11 +400,34 @@ def chat(request: Request, q: str):
                     full_response += token
                     yield _sse("token", {"token": token})
         except Exception as e:
-            full_response = f"Operational Processing Error: {e}"
+            llm_failed = True
+            full_response = _user_error(e, "The answer could not be generated")
             yield _sse("token", {"token": full_response})
+        finally:
+            # Close the upstream stream even if the client disconnected
+            # mid-response, so the connection is not left to GC.
+            try:
+                if stream is not None and hasattr(stream, "close"):
+                    stream.close()
+            except Exception:
+                pass
+
+        if llm_failed:
+            # Don't build a PPTX out of an error string, and don't make a
+            # second Groq call for suggestions when Groq just failed.
+            _append_history(session_data, {
+                "role": "assistant", "kind": "normal", "badge": badge,
+                "content": full_response, "chart": None, "download_id": None,
+            })
+            _save_session_data(sid, session_data)
+            yield _sse("final", {
+                "kind": "normal", "badge": badge, "header": "",
+                "reply": full_response, "chart": None, "download_id": None,
+            })
+            return
 
         result = vog_core.finalize_normal_response(state, full_response)
-        download_id = _store_downloads(result["downloads"])
+        download_id = _store_downloads(result["downloads"], sid)
         if "context" in state:
             # Carry the reply text forward too, so a later "what other
             # insights..." follow-up can be told what was already said and
@@ -281,6 +446,7 @@ def chat(request: Request, q: str):
             "content": header + full_response, "chart": result["chart"],
             "download_id": download_id, "suggestions": suggestions,
         })
+        _save_session_data(sid, session_data)
         yield _sse("final", {
             "kind": "normal", "badge": badge, "header": header,
             "reply": full_response, "chart": result["chart"],
@@ -296,7 +462,7 @@ def chat(request: Request, q: str):
 @app.post("/chat/clear")
 def chat_clear(request: Request):
     sid = _get_sid(request)
-    _SESSION_STORE[sid] = {"history": [], "prior_context": None}
+    shared_state.clear_session(sid, max_entries=_MAX_SESSIONS, ttl=_SESSION_TTL)
     return {"success": True}
 
 
@@ -312,17 +478,48 @@ _DOWNLOAD_META = {
 
 
 @app.get("/download/{download_id}/{kind}")
-def download(download_id: str, kind: str):
-    entry = _DOWNLOAD_STORE.get(download_id)
-    if not entry or kind not in _DOWNLOAD_META or not entry.get(kind):
+def download(request: Request, download_id: str, kind: str):
+    entry = shared_state.get_download(download_id)
+    if not entry or kind not in _DOWNLOAD_META:
         raise HTTPException(status_code=404, detail="Download not found or expired")
+
+    # Bind to the owning session: the id travels in an <a href>, so it ends
+    # up in browser history and proxy logs. Without this it is an
+    # indefinite bearer token for someone else's exported data.
+    if entry.get("owner") and entry["owner"] != _get_sid(request):
+        raise HTTPException(status_code=404, detail="Download not found or expired")
+    if time.time() - entry.get("created", 0) > _DOWNLOAD_TTL:
+        raise HTTPException(status_code=404, detail="Download not found or expired")
+
+    blob = (entry.get("downloads") or {}).get(kind)
+    if not blob:
+        raise HTTPException(status_code=404, detail="Download not found or expired")
+
     media_type, filename = _DOWNLOAD_META[kind]
     return Response(
-        content=entry[kind], media_type=media_type,
-        headers={"Content-Disposition": f'attachment; filename="{filename}"'}
+        content=blob, media_type=media_type,
+        headers={
+            "Content-Disposition": f'attachment; filename="{filename}"',
+            "X-Content-Type-Options": "nosniff",
+        }
     )
 
 
 @app.get("/health")
 def health():
-    return {"status": "ok", "build": APP_BUILD}
+    """Liveness only — deliberately does not echo the build string, model
+    name or QA notes to unauthenticated callers."""
+    return {"status": "ok"}
+
+
+@app.get("/health/detail")
+def health_detail(request: Request):
+    if not request.session.get("authenticated"):
+        raise HTTPException(status_code=401, detail="Not authenticated")
+    return {
+        "status": "ok",
+        "build": APP_BUILD,
+        "state_backend": shared_state.backend_name(),
+        "durable_state": shared_state.is_durable(),
+        "admin_enabled": ADMIN_ENABLED,
+    }
