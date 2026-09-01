@@ -191,7 +191,8 @@ PRODUCT_STOPWORDS = {
     "sentiment", "sentiments", "feedback", "feedbacks", "product", "products",
     "syngenta", "app", "price", "unavailability", "complaint", "complaints",
     "positive", "negative", "overview", "overall", "general", "summary",
-    "both", "analysis", "grower", "growers", "advisory", "week", "weeks",
+    "both", "analysis", "grower", "growers", "farmer", "farmers", "people",
+    "advisory", "week", "weeks",
     "list", "listed", "listing", "bullet", "bullets", "compare", "comparison",
     "versus", "give", "show", "tell", "what", "are", "about", "the", "for",
     "and", "of", "in", "on", "me", "please", "this", "that", "month",
@@ -1107,6 +1108,8 @@ def build_header(query_intent, timeframe_label, active_product, periods, active_
             return f"🌻 Positive Feedback about {subject_label}{suffix}:\n\n"
         elif query_intent == "suggestion":
             return f"💡 Suggestions about {subject_label}{suffix}:\n\n"
+        elif query_intent == "topics":
+            return f"🗣️ What's Being Said About {subject_label}{suffix}:\n\n"
         else:
             return f"🌾 {subject_label} — Sentiment Overview{suffix}:\n\n"
 
@@ -1116,6 +1119,8 @@ def build_header(query_intent, timeframe_label, active_product, periods, active_
         return f"🌻 Positive Feedback of {timeframe_label}:\n\n"
     elif query_intent == "suggestion":
         return f"💡 Suggestions & Improvement Ideas for {timeframe_label}:\n\n"
+    elif query_intent == "topics":
+        return f"🗣️ Top Topics of {timeframe_label}:\n\n"
     elif category_filter == PRODUCT_QUERY_CATEGORY:
         return f"💰 Product Inquiries of {timeframe_label}:\n\n"
     else:
@@ -1135,6 +1140,8 @@ def build_intent_badge(query_intent, active_product, periods, active_crop=None, 
         return "🌻 Positive"
     if query_intent == "suggestion":
         return "💡 Suggestions"
+    if query_intent == "topics":
+        return "🗣️ Top Topics"
     if category_filter == PRODUCT_QUERY_CATEGORY:
         return "💰 Product Inquiries"
     return "🌾 Sentiment Overview"
@@ -1192,14 +1199,16 @@ def build_system_prompt(query_intent, timeframe_label, explicit_list_format, act
         "complaint":  "complaints and concerns (including root-cause issues)",
         "positive":   "positive feedback and appreciation",
         "suggestion": "grower suggestions and improvement recommendations",
-        "sentiment":  "overall sentiment (both positive and negative)"
+        "sentiment":  "overall sentiment (both positive and negative)",
+        "topics":     "the most frequently discussed topics and themes",
     }[query_intent]
 
     opening_hint = {
         "complaint":  f"e.g. 'Here are the complaints for {timeframe_label}:'",
         "positive":   f"e.g. 'The positive feedback for {timeframe_label} looks great!'",
         "suggestion": f"e.g. 'Here are the grower suggestions for {timeframe_label}:'",
-        "sentiment":  f"e.g. 'Here is the sentiment overview for {timeframe_label}:'"
+        "sentiment":  f"e.g. 'Here is the sentiment overview for {timeframe_label}:'",
+        "topics":     f"e.g. 'Here's what growers are talking about most for {timeframe_label}:'",
     }[query_intent]
     subject_label = build_subject_label(active_product, active_crop)
     if subject_label:
@@ -1262,8 +1271,27 @@ def build_system_prompt(query_intent, timeframe_label, explicit_list_format, act
                 "Paragraph 2 — Complaints & Concerns: summarize issues.\n"
                 "Each paragraph should be 3-5 sentences max.\n"
             )
+        elif query_intent == "topics":
+            structure_clause = (
+                "Structure your response as one short paragraph per topic (3-6 "
+                "topics total, most-discussed first), each naming the topic and "
+                "summarizing what's said about it in 1-2 sentences.\n"
+            )
         else:
             structure_clause = "Keep the response to 4-6 sentences max.\n"
+
+    topics_clause = ""
+    if query_intent == "topics":
+        topics_clause = (
+            "This is a TOPICS/THEMES request, not a sentiment request: identify "
+            "the 3-6 most frequently occurring topics or themes in the data "
+            "context below (e.g. pricing, product performance, packaging, "
+            "availability, application timing) and briefly describe what "
+            "growers are saying about each one. Do NOT frame this as "
+            "positive-vs-negative sentiment analysis — focus on WHAT is being "
+            "discussed, not whether it is good or bad. Order topics from most "
+            "to least frequently mentioned where you can tell.\n"
+        )
 
     # An explicit output-format request (table / exec summary / PPT outline)
     # always wins over the default bullet/prose formatting instructions.
@@ -1296,6 +1324,7 @@ def build_system_prompt(query_intent, timeframe_label, explicit_list_format, act
             if wants_products_only else ""
         )
         + f"{comparison_clause}"
+        f"{topics_clause}"
         f"{format_clause}"
         f"{structure_clause}"
         f"Start your response with a short, clear opening line ({opening_hint}), then "
@@ -1647,6 +1676,13 @@ def process_chat_query(user_query: str, pinecone_api_key: str, groq_api_key: str
     wants_trend = detect_trend_request(query_lower)
     aggregation_dimension = detect_aggregation_request(query_lower)
 
+    topic_keywords = [
+        "talking about", "talking most about", "talking the most about",
+        "most discussed", "most talked about", "common themes",
+        "main themes", "what topics", "which topics", "trending topics",
+        "top topics", "hot topics", "being discussed", "being talked about",
+        "conversation topics", "main subjects", "most common subjects",
+    ]
     complaint_keywords = [
         "complaint", "complaints", "negative feedback",
         "negative", "issues", "problems", "concerns",
@@ -1689,7 +1725,14 @@ def process_chat_query(user_query: str, pinecone_api_key: str, groq_api_key: str
 
     query_intent = "sentiment"
     intent_explicit = False
-    if any(phrase in query_lower for phrase in complaint_keywords):
+    if any(phrase in query_lower for phrase in topic_keywords):
+        # Checked first: "what are growers talking about" is a THEMES/TOPICS
+        # question, not a positive/negative valence question — forcing it
+        # through the same sentiment-overview template is exactly the
+        # one-size-fits-all problem this intent exists to avoid.
+        query_intent = "topics"
+        intent_explicit = True
+    elif any(phrase in query_lower for phrase in complaint_keywords):
         query_intent = "complaint"
         intent_explicit = True
     elif any(phrase in query_lower for phrase in positive_keywords):
@@ -2024,7 +2067,7 @@ def process_chat_query(user_query: str, pinecone_api_key: str, groq_api_key: str
         f"do not exceed this number):\n{combined_context}\n\n"
         f"User Query: {user_query}"
     )
-    response_token_budget = 900 if output_format in ("exec_summary", "table", "ppt") else 500
+    response_token_budget = 900 if output_format in ("exec_summary", "table", "ppt") or query_intent == "topics" else 500
 
     return {
         "kind": "normal",
@@ -2136,7 +2179,9 @@ def llm_assisted_query_understanding(user_query, groq_api_key):
             "You are a query classifier for a grower-feedback chatbot. Given a vague user "
             "question, propose the most likely product, crop, and intent it's about. "
             'Return ONLY a JSON object: {"product": "<name or null>", "crop": "<name or null>", '
-            '"intent": "<one of: complaint, positive, suggestion, sentiment>"}. '
+            '"intent": "<one of: complaint, positive, suggestion, sentiment, topics>"}. '
+            'Use "topics" when the question asks what people are talking about or '
+            "discussing, rather than whether feedback is positive or negative. "
             "If you are not confident about a field, use null for it. Never invent a product "
             "or crop name — only propose one if it is a real product/crop explicitly present "
             "in the user's own question."
@@ -2163,7 +2208,7 @@ def llm_assisted_query_understanding(user_query, groq_api_key):
             result["crop"] = proposed_crop.strip().lower()
 
         proposed_intent = parsed.get("intent")
-        if proposed_intent in ("complaint", "positive", "suggestion", "sentiment"):
+        if proposed_intent in ("complaint", "positive", "suggestion", "sentiment", "topics"):
             result["intent"] = proposed_intent
 
         if not any(result.values()):

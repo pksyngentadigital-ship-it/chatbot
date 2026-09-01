@@ -78,6 +78,12 @@ def test_llm_query_understanding_accepts_known_product(fake_groq_factory):
     assert result == {"product": "isabion", "crop": None, "intent": "complaint"}
 
 
+def test_llm_query_understanding_accepts_topics_intent(fake_groq_factory):
+    fake_groq_factory(json.dumps({"product": None, "crop": None, "intent": "topics"}))
+    result = vc.llm_assisted_query_understanding("what's everyone talking about lately", "fake-key")
+    assert result == {"product": None, "crop": None, "intent": "topics"}
+
+
 def test_llm_query_understanding_rejects_hallucinated_product(fake_groq_factory):
     # The exact failure mode observed live: the LLM invents a plausible-
     # sounding product name that isn't in the real catalog.

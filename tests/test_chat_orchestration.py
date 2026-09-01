@@ -471,3 +471,52 @@ def test_correction_message_works_without_any_api_keys():
     # either is touched.
     state = vc.process_chat_query("that's wrong, please fix this", None)
     assert state["kind"] == "meta_feedback"
+
+
+# ── "farmers" false-positive + genuine "topics" intent ──
+
+def test_farmers_is_never_detected_as_a_product(fake_pinecone_factory):
+    # Reported live: "farmers" is one of the most common words in the
+    # entire dataset (it's a grower-feedback app), so the dynamic
+    # product-probe fallback confirmed it as a "product" for any query
+    # containing the word — the same false-positive class as
+    # other/pricing/delayed/kaho, just far higher-frequency.
+    fake_pinecone_factory([
+        make_record("January", "2026", "positive", "Positive Feedback", "Farmers were happy with the results."),
+    ])
+    state = vc.process_chat_query("what are farmers talking most about?", "fake-key")
+    assert state.get("context", {}).get("product") != "farmers"
+
+
+def test_topics_query_gets_its_own_intent_and_badge(fake_pinecone_factory):
+    fake_pinecone_factory([
+        make_record("January", "2026", "positive", "Positive Feedback", "Growers happy with pricing this month."),
+        make_record("January", "2026", "negative", "Complaint/Negative Feedback", "Packaging was damaged on arrival."),
+    ])
+    state = vc.process_chat_query("what are farmers talking most about?", "fake-key")
+    assert state["kind"] == "normal"
+    assert state["query_intent"] == "topics"
+    assert state["badge"] == "🗣️ Top Topics"
+    assert "TOPICS/THEMES" in state["system_prompt"]
+    assert "positive-vs-negative sentiment" in state["system_prompt"]
+
+
+def test_topics_query_is_not_sentiment_filtered(fake_pinecone_factory):
+    # A topics question needs the full breadth of feedback (both positive
+    # and negative) to find genuine themes — it must not be silently
+    # narrowed to only positive or only negative records.
+    fake_pinecone_factory([
+        make_record("January", "2026", "positive", "Positive Feedback", "Growers happy with pricing this month."),
+        make_record("January", "2026", "negative", "Complaint/Negative Feedback", "Packaging was damaged on arrival."),
+    ])
+    state = vc.process_chat_query("what topics are most discussed this month?", "fake-key")
+    assert len(state["positive_bullets"]) == 1
+    assert len(state["negative_bullets"]) == 1
+
+
+def test_topics_keyword_takes_priority_over_generic_sentiment_default(fake_pinecone_factory):
+    fake_pinecone_factory([
+        make_record("January", "2026", "positive", "Positive Feedback", "x"),
+    ])
+    state = vc.process_chat_query("what are the most talked about subjects?", "fake-key")
+    assert state.get("query_intent") == "topics"
