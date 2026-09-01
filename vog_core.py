@@ -823,12 +823,50 @@ def extract_all_weeks(query_lower: str) -> list[str]:
     return normalized
 
 
+def detect_all_products(query_lower: str) -> list[str]:
+    """Every catalog product named in the query, in the order the USER wrote
+    them, longest-match-first so "Isabion Gold" wins over "Isabion".
+
+    detect_product_known returns only the first match and scans in CATALOG
+    order, so "compare Tilt and Isabion" silently answered about Isabion
+    alone — and not even because it came first in the question, but because
+    it sits earlier in PRODUCT_LIST.
+    """
+    hits = []
+    for product in sorted(PRODUCT_LIST, key=len, reverse=True):
+        m = re.search(r'\b' + re.escape(product) + r'\b', query_lower)
+        if m:
+            # Skip a shorter product fully contained in one already matched.
+            if any(product in longer and product != longer for longer, _ in hits):
+                continue
+            hits.append((product, m.start()))
+    return [p for p, _ in sorted(hits, key=lambda t: t[1])]
+
+
+def detect_all_crops(query_lower: str) -> list[str]:
+    """Every catalog crop named in the query, in the order the user wrote them."""
+    hits = []
+    for crop in sorted(CROP_LIST, key=len, reverse=True):
+        m = re.search(r'\b' + re.escape(crop) + r'\b', query_lower)
+        if m:
+            if any(crop in longer and crop != longer for longer, _ in hits):
+                continue
+            hits.append((crop, m.start()))
+    ordered = [c for c, _ in sorted(hits, key=lambda t: t[1])]
+    # Collapse synonyms so "rice and paddy" isn't treated as two subjects.
+    seen, out = set(), []
+    for c in ordered:
+        key = canonical_crop(c).lower()
+        if key not in seen:
+            seen.add(key)
+            out.append(c)
+    return out
+
+
 def detect_product_known(query_lower: str) -> str | None:
-    """Fast path: match against the curated PRODUCT_LIST."""
-    for product in PRODUCT_LIST:
-        if re.search(r'\b' + re.escape(product) + r'\b', query_lower):
-            return product
-    return None
+    """Fast path: the first catalog product named in the query."""
+    products = detect_all_products(query_lower)
+    return products[0] if products else None
 
 
 # A candidate must look like a brand rather than an ordinary word before it
@@ -1484,7 +1522,7 @@ def build_intent_badge(query_intent, active_product, periods, active_crop=None, 
     return "🌾 Sentiment Overview"
 
 
-def build_system_prompt(query_intent, timeframe_label, explicit_list_format, active_product, periods, active_crop=None, output_format=None, wants_products_only=False, avoid_repeat_text=None):
+def build_system_prompt(query_intent, timeframe_label, explicit_list_format, active_product, periods, active_crop=None, output_format=None, wants_products_only=False, avoid_repeat_text=None, comparison_axis="time"):
     """ Unified prompt builder. Preserves the original prose behaviour (including the two-paragraph favorable/complaints structure for the default sentiment case) while adding: real markdown bullet formatting when the user explicitly asks to "list" something, strict single-product/crop focus, explicit period-by-period comparison instructions, and output-format overrides (table / executive summary / PPT outline). """
     product_label = active_product.title() if active_product else None
     crop_label = active_crop.title() if active_crop else None
@@ -1518,19 +1556,34 @@ def build_system_prompt(query_intent, timeframe_label, explicit_list_format, act
     comparison_clause = ""
     if periods:
         period_names = ", ".join(p[0] for p in periods)
-        comparison_clause = (
-            f"This is a COMPARISON request across these periods: {period_names}. "
-            f"The data context below is divided into clearly labeled sections, one per "
-            f"period. Explicitly compare the periods against each other — call out what "
-            f"increased, decreased, improved, worsened, or stayed roughly the same. "
-            f"Refer to each period by its exact name. "
-            f"CRITICAL: for every point you make, name the specific product it is about "
-            f"(never speak only in generic sentences with no product named), and for each "
-            f"period state plainly whether that product's feedback was positive/satisfactory "
-            f"or negative/unsatisfactory in that period — e.g. 'In {period_names.split(', ')[0]}, "
-            f"growers were satisfied with <Product>, but in the other period they were not.' "
-            f"Do this for every product that appears in the data context.\n"
-        )
+        first = period_names.split(', ')[0]
+        if comparison_axis == "subject":
+            # Comparing products/crops against each other, not time periods.
+            comparison_clause = (
+                f"This is a side-by-side COMPARISON of: {period_names}. "
+                f"The data context below is divided into one clearly labeled section per "
+                f"item. Compare them directly against each other — say which is better "
+                f"received and in what respect, and call out where they differ. Refer to "
+                f"each by its exact name, and cover EVERY one of them: do not answer about "
+                f"only one. If the data context for one of them is empty, say plainly that "
+                f"there is no feedback for it rather than omitting it silently. "
+                f"End with a one-sentence bottom line, e.g. 'Overall {first} is better "
+                f"regarded for <reason>.'\n"
+            )
+        else:
+            comparison_clause = (
+                f"This is a COMPARISON request across these periods: {period_names}. "
+                f"The data context below is divided into clearly labeled sections, one per "
+                f"period. Explicitly compare the periods against each other — call out what "
+                f"increased, decreased, improved, worsened, or stayed roughly the same. "
+                f"Refer to each period by its exact name. "
+                f"CRITICAL: for every point you make, name the specific product it is about "
+                f"(never speak only in generic sentences with no product named), and for each "
+                f"period state plainly whether that product's feedback was positive/satisfactory "
+                f"or negative/unsatisfactory in that period — e.g. 'In {first}, "
+                f"growers were satisfied with <Product>, but in the other period they were not.' "
+                f"Do this for every product that appears in the data context.\n"
+            )
 
     intent_label = {
         "complaint":  "complaints and concerns (including root-cause issues)",
@@ -2336,12 +2389,15 @@ def process_chat_query(user_query: str, pinecone_api_key: str, groq_api_key: str
     except Exception as e:
         return {"kind": "no_data", "reply": f"Query embedding failed: {e}"}
 
-    active_product = detect_product_known(query_lower)
+    all_products = detect_all_products(query_lower)
+    all_crops = detect_all_crops(query_lower)
+    active_product = all_products[0] if all_products else None
     if not active_product:
         active_product = detect_product_dynamic(query_lower, index, pc, original_query=user_query)
-    active_crop = detect_crop(query_lower)
+    active_crop = all_crops[0] if all_crops else None
     if active_product and active_crop and active_product.lower() == active_crop.lower():
         active_product = None
+        all_products = [p for p in all_products if p.lower() != active_crop.lower()]
 
     # ── Follow-up slot inheritance: only fills gaps the CURRENT query left
     # unspecified, and only on an explicit continuation phrase — never
@@ -2414,7 +2470,25 @@ def process_chat_query(user_query: str, pinecone_api_key: str, groq_api_key: str
             retrieval_vector = query_vector
 
     # ── Comparison auto-detection ──
+    # Two axes are supported: TIME (two+ months/years/weeks) and SUBJECT
+    # (two+ products or two+ crops). Subject comparison did not exist at
+    # all — "compare customer sentiment for Tilt and Isabion", one of the
+    # app's own suggested prompts, answered about a single product because
+    # detection returned only the first catalog match.
     periods = build_comparison_periods(all_months, all_years, all_weeks, index)
+    subject_comparison = None
+    if not periods:
+        if len(all_products) >= 2:
+            subject_comparison = [(p.title(), p, active_crop) for p in all_products]
+        elif len(all_crops) >= 2:
+            subject_comparison = [(canonical_crop(c), active_product, c) for c in all_crops]
+    if subject_comparison:
+        # Reuse the time-comparison plumbing: one "period" per subject, with
+        # the timeframe held fixed across them.
+        periods = [
+            (label, detected_month, detected_year, detected_week)
+            for label, _, _ in subject_comparison
+        ]
 
     # ── Relative time-window detection ("last 30 days", "last quarter",
     # "last 3 months") — only when the query didn't already pin an explicit
@@ -2450,18 +2524,26 @@ def process_chat_query(user_query: str, pinecone_api_key: str, groq_api_key: str
 
     if periods:
         period_results = []
-        for label, m, y, w in periods:
+        for i, (label, m, y, w) in enumerate(periods):
+            # On a subject comparison each entry filters to ITS OWN product
+            # or crop; on a time comparison they all share the query's
+            # single subject.
+            if subject_comparison:
+                _, seg_product, seg_crop = subject_comparison[i]
+            else:
+                seg_product, seg_crop = active_product, active_crop
+
             p_pos, p_neg, p_neut = query_pinecone_for_timeframe(
                 index, retrieval_vector, m, y, w, query_intent, top_k=retrieval_top_k, category_filter=category_filter
             )
-            if active_product:
-                p_pos = filter_bullets_by_product(p_pos, active_product)
-                p_neg = filter_bullets_by_product(p_neg, active_product)
-                p_neut = filter_bullets_by_product(p_neut, active_product)
-            if active_crop:
-                p_pos = filter_bullets_by_crop(p_pos, active_crop)
-                p_neg = filter_bullets_by_crop(p_neg, active_crop)
-                p_neut = filter_bullets_by_crop(p_neut, active_crop)
+            if seg_product:
+                p_pos = filter_bullets_by_product(p_pos, seg_product)
+                p_neg = filter_bullets_by_product(p_neg, seg_product)
+                p_neut = filter_bullets_by_product(p_neut, seg_product)
+            if seg_crop:
+                p_pos = filter_bullets_by_crop(p_pos, seg_crop)
+                p_neg = filter_bullets_by_crop(p_neg, seg_crop)
+                p_neut = filter_bullets_by_crop(p_neut, seg_crop)
 
             MAX_BULLETS = 12
             period_results.append((label, p_pos[:MAX_BULLETS], p_neg[:MAX_BULLETS], p_neut[:MAX_BULLETS]))
@@ -2561,9 +2643,15 @@ def process_chat_query(user_query: str, pinecone_api_key: str, groq_api_key: str
         timeframe_label = " ".join(timeframe_parts) or DEFAULT_TIMEFRAME_LABEL
         period_results = None
 
-    header = build_header(query_intent, timeframe_label, active_product, periods, active_crop, category_filter=category_filter)
-    badge = build_intent_badge(query_intent, active_product, periods, active_crop, category_filter=category_filter)
-    subject_label = build_subject_label(active_product, active_crop)
+    # On a subject comparison the subjects ARE the comparison axis, so they
+    # must not also be rendered as a single scoping label — otherwise the
+    # header reads "Isabion — Sentiment Comparison: Tilt vs Isabion".
+    header_product = None if subject_comparison else active_product
+    header_crop = None if subject_comparison else active_crop
+
+    header = build_header(query_intent, timeframe_label, header_product, periods, header_crop, category_filter=category_filter)
+    badge = build_intent_badge(query_intent, header_product, periods, header_crop, category_filter=category_filter)
+    subject_label = build_subject_label(header_product, header_crop)
     resolved_context = {"product": active_product, "crop": active_crop, "intent": query_intent}
 
     if total_found == 0:
@@ -2659,7 +2747,8 @@ def process_chat_query(user_query: str, pinecone_api_key: str, groq_api_key: str
     system_prompt = build_system_prompt(
         query_intent, timeframe_label, explicit_list_format, active_product, periods,
         active_crop=active_crop, output_format=output_format, wants_products_only=wants_products_only,
-        avoid_repeat_text=avoid_repeat_text
+        avoid_repeat_text=avoid_repeat_text,
+        comparison_axis="subject" if subject_comparison else "time",
     )
     # Be explicit with the model about sampling. Saying "N total" when N was
     # a truncated slice invited it to describe a 12-record sample as the
