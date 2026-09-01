@@ -113,7 +113,7 @@ PRODUCT_LIST = [
     # (nayasavera.online) — both branded products and generic
     # active-ingredient names sold there.
     "cropwise", "quantis", "isabion", "isabion gold", "allymax", "axial",
-    "walter", "walter super", "kaho", "solubor", "amistar", "amistar top",
+    "walter", "walter super", "solubor", "amistar", "amistar top",
     "incipio", "simodis", "solvigo", "rifit", "logran", "cruiser", "enrich",
     "virtako", "proclaim", "thiovit", "thiovit jet", "thiovet",
     "pendimethalin", "polytrin", "polytrin c", "chlorpyrifos", "glyphosate",
@@ -239,6 +239,12 @@ PRODUCT_STOPWORDS = {
     "opinion", "opinions", "views", "perception", "perceptions",
     "reaction", "reactions", "impression", "impressions", "experience",
     "experiences",
+    # "Kaho" is a Syngenta podcast/campaign name, not a product — it was
+    # mistakenly included in an earlier PRODUCT_LIST pass and genuinely
+    # appears in real feedback text (podcast mentions), so it must be
+    # excluded here too or the dynamic product-probe fallback would just
+    # re-confirm it as a "product" anyway.
+    "kaho",
 } | set(MONTH_MAP.keys()) | set(BUSINESS_KEYWORDS) | set(DISEASE_PEST_TERMS) | set(SALES_KEYWORDS)
 
 ALLOWED_GUARDRAIL_KEYWORDS = set([

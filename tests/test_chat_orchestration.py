@@ -152,6 +152,20 @@ def test_pricing_is_never_detected_as_a_product(fake_pinecone_factory):
     assert state.get("context", {}).get("product") != "pricing"
 
 
+def test_kaho_is_never_detected_as_a_product(fake_pinecone_factory):
+    # Reported live: "Kaho" is a Syngenta podcast/campaign name, not a
+    # product, but it was mistakenly in PRODUCT_LIST and genuinely appears
+    # in real feedback text ("Kaho Syngenta Podcast"), so it must also be
+    # excluded from the dynamic product-probe fallback or it gets
+    # re-confirmed as a "product" anyway.
+    fake_pinecone_factory([
+        make_record("January", "2026", "positive", "Positive Feedback",
+                     "The Kaho Syngenta Podcast was well received by listeners."),
+    ])
+    state = vc.process_chat_query("what do people think about kaho?", "fake-key")
+    assert state.get("context", {}).get("product") != "kaho"
+
+
 def test_delayed_is_never_detected_as_a_product(fake_pinecone_factory):
     # Found live against the real production dataset: "delayed" — one of
     # the Phase 4 intent-keyword-expansion words — appears verbatim in real
