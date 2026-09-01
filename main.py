@@ -256,6 +256,26 @@ def admin_logout(request: Request):
     return RedirectResponse(url="/admin", status_code=303)
 
 
+@app.get("/admin/toolcall-probe")
+async def admin_toolcall_probe(request: Request):
+    """Stage 0 go/no-go for the agentic rebuild: can this model reliably
+    pick the right tool with the right arguments? Runs ~10 real questions
+    against the live model using the server's configured key, so nobody
+    has to move a credential around. Read-only — it plans tool calls but
+    never executes them, so it cannot touch the index."""
+    if not request.session.get("authenticated"):
+        raise HTTPException(status_code=401, detail="Not authenticated")
+    if not GROQ_API_KEY:
+        raise HTTPException(status_code=400, detail="Groq API key is not configured")
+    try:
+        from scripts.toolcall_probe import run_probe
+        return await run_in_threadpool(run_probe, GROQ_API_KEY, vog_core.GROQ_MODEL)
+    except Exception as e:
+        ref = uuid.uuid4().hex[:8]
+        log.exception("Tool-call probe failed [ref=%s]", ref)
+        raise HTTPException(status_code=500, detail=f"Probe failed (ref {ref}): {type(e).__name__}")
+
+
 @app.post("/admin/feedback-log/clear")
 def admin_clear_feedback_log(request: Request):
     if not request.session.get("authenticated"):
