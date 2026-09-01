@@ -305,7 +305,16 @@ ALLOWED_GUARDRAIL_KEYWORDS = set([
     "complaint", "complaints", "positive", "negative", "grower", "growers",
     "advisory", "week", "weeks", "1st", "2nd", "3rd", "4th", "5th", "first",
     "second", "third", "fourth", "fifth", "issues", "concerns", "problems",
-    "appreciation", "praise", "compare", "comparison", "versus", "list"
+    "appreciation", "praise", "compare", "comparison", "versus", "list",
+    # Words that describe the feedback discourse itself. Without these the
+    # guardrail refused perfectly reasonable questions for this tool —
+    # "what is dominating the conversation right now?" was answered with
+    # "I cannot generate this response" purely because no listed domain
+    # noun happened to appear in it.
+    "conversation", "conversations", "talking", "talked", "saying", "said",
+    "discussed", "discussing", "discussion", "discussions", "mentioned",
+    "mentions", "raised", "reporting", "asking", "asked", "theme", "themes",
+    "topic", "topics", "subject", "subjects", "farmer", "farmers", "people",
 ]) | set(PRODUCT_LIST) | set(CROP_LIST) | set(BUSINESS_KEYWORDS)
 
 SUGGESTED_PROMPTS = {
@@ -2427,12 +2436,25 @@ def process_chat_query(user_query: str, pinecone_api_key: str, groq_api_key: str
     # anything already resolved. Whatever it proposes is validated against
     # the real product/crop/intent lists before being trusted (see
     # llm_assisted_query_understanding). ──
-    if not active_product and not active_crop and not intent_explicit and not sales_scoped and groq_api_key:
+    # Fires whenever the deterministic layer did not confidently establish
+    # an INTENT, not only when it found nothing at all. That narrower gate
+    # left the most common misread untouched: a question no keyword list
+    # happens to cover silently becomes "sentiment", so "why are growers
+    # unhappy with delivery" was answered as a neutral overview instead of
+    # a complaint. Keyword lists cannot enumerate how people actually
+    # phrase things; a closed-enum classification can, and it cannot invent
+    # a category because every field is validated before use.
+    # Gated on the INTENT gap specifically. Widening it to also fire when
+    # only a subject was missing added an LLM round trip to every general
+    # question ("what are the complaints this month?") that was already
+    # fully understood, for no benefit — there was no subject to find.
+    if groq_api_key and not intent_explicit and not sales_scoped:
         llm_guess = llm_assisted_query_understanding(user_query, groq_api_key)
         if llm_guess:
-            if llm_guess.get("product"):
+            # Only fills genuine gaps; never overrides a deterministic result.
+            if not active_product and llm_guess.get("product"):
                 active_product = llm_guess["product"]
-            if llm_guess.get("crop"):
+            if not active_crop and llm_guess.get("crop"):
                 active_crop = llm_guess["crop"]
             if llm_guess.get("intent"):
                 query_intent = llm_guess["intent"]
@@ -2880,15 +2902,29 @@ def llm_assisted_query_understanding(user_query, groq_api_key):
     try:
         client = Groq(api_key=groq_api_key)
         system_prompt = (
-            "You are a query classifier for a grower-feedback chatbot. Given a vague user "
-            "question, propose the most likely product, crop, and intent it's about. "
+            "You are a query classifier for an agricultural grower-feedback chatbot. "
+            "Classify the user's question.\n\n"
             'Return ONLY a JSON object: {"product": "<name or null>", "crop": "<name or null>", '
-            '"intent": "<one of: complaint, positive, suggestion, sentiment, topics>"}. '
-            'Use "topics" when the question asks what people are talking about or '
-            "discussing, rather than whether feedback is positive or negative. "
-            "If you are not confident about a field, use null for it. Never invent a product "
-            "or crop name — only propose one if it is a real product/crop explicitly present "
-            "in the user's own question."
+            '"intent": "<one of: complaint, positive, suggestion, sentiment, topics>"}\n\n'
+            "Intent definitions — pick by what the user actually wants, not by "
+            "which words appear:\n"
+            "- complaint: problems, issues, dissatisfaction, things going wrong, "
+            "root causes, why something failed.\n"
+            "- positive: praise, what is working well, satisfaction, successes.\n"
+            "- suggestion: what people want changed, asked for, or improved; "
+            "requests, expectations, ideas.\n"
+            "- topics: what is being discussed most; themes, subjects, "
+            "'what are people talking about' — NOT whether it is good or bad.\n"
+            "- sentiment: a general read of both good and bad together; use this "
+            "only when none of the above fits better.\n\n"
+            "Examples:\n"
+            'Q: "why are growers unhappy with delivery" -> {"product": null, "crop": null, "intent": "complaint"}\n'
+            'Q: "what is working well this season" -> {"product": null, "crop": null, "intent": "positive"}\n'
+            'Q: "what do growers wish we did differently" -> {"product": null, "crop": null, "intent": "suggestion"}\n'
+            'Q: "what is dominating the conversation" -> {"product": null, "crop": null, "intent": "topics"}\n'
+            'Q: "give me a read on how wheat growers feel" -> {"product": null, "crop": "wheat", "intent": "sentiment"}\n\n'
+            "If you are not confident about product or crop, use null. Never invent a "
+            "product or crop name — only name one that appears in the user's own question."
         )
         resp = client.chat.completions.create(
             model=GROQ_MODEL,

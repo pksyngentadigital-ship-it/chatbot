@@ -442,6 +442,45 @@ def test_llm_fallback_not_invoked_when_intent_already_explicit(fake_pinecone_fac
     assert calls == []
 
 
+def test_llm_rescues_intent_when_no_keyword_matched(fake_pinecone_factory, fake_groq_factory):
+    # The most common misread: a phrasing no keyword list covers silently
+    # becomes "sentiment". Here the question is about themes, so the
+    # classifier should return "topics" rather than letting it default.
+    fake_groq_factory(json.dumps({"product": None, "crop": None, "intent": "topics"}))
+    fake_pinecone_factory([
+        make_record("January", "2026", "positive", "Positive Feedback", "Cropwise app is useful"),
+        make_record("January", "2026", "negative", "Complaint/Negative Feedback", "Packaging damaged"),
+    ])
+    state = vc.process_chat_query(
+        "what is dominating the conversation right now?", "fake-key", groq_api_key="fake-groq-key"
+    )
+    assert state["query_intent"] == "topics", "an unmatched phrasing must not silently default to sentiment"
+
+
+def test_llm_intent_is_still_validated_against_the_enum(fake_pinecone_factory, fake_groq_factory):
+    fake_groq_factory(json.dumps({"product": None, "crop": None, "intent": "extremely-enthusiastic"}))
+    fake_pinecone_factory([
+        make_record("January", "2026", "positive", "Positive Feedback", "Something good"),
+    ])
+    state = vc.process_chat_query(
+        "give me a read on things for growers", "fake-key", groq_api_key="fake-groq-key"
+    )
+    # Falls back to the deterministic default rather than adopting an
+    # invented category.
+    assert state.get("query_intent") in ("sentiment", "complaint", "positive", "suggestion", "topics")
+
+
+def test_deterministic_intent_is_never_overridden_by_the_llm(fake_pinecone_factory, fake_groq_factory):
+    fake_groq_factory(json.dumps({"product": None, "crop": None, "intent": "positive"}))
+    fake_pinecone_factory([
+        make_record("January", "2026", "negative", "Complaint/Negative Feedback", "Late delivery."),
+    ])
+    state = vc.process_chat_query(
+        "what are the complaints this month?", "fake-key", groq_api_key="fake-groq-key"
+    )
+    assert state["query_intent"] == "complaint", "an explicit keyword match must win"
+
+
 # ── Correction/meta-feedback short-circuit ──
 
 def test_correction_message_short_circuits_before_any_retrieval(fake_pinecone_factory, fake_groq_factory):
