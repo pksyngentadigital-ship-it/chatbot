@@ -221,7 +221,24 @@ PRODUCT_STOPWORDS = {
     # "no other issues", "compared to other products") — without this, the
     # dynamic product-probe fallback mistakes the word itself for a product
     # name whenever a query like "what other insights..." reaches it.
-    "other", "others", "another", "anything", "something", "else"
+    "other", "others", "another", "anything", "something", "else",
+    # Phase 4 intent-keyword-expansion words (complaint/positive/suggestion/
+    # sentiment phrasing added below in process_chat_query) are common
+    # English words that show up verbatim in real feedback text — same
+    # false-positive risk "other"/"pricing" already exposed live. "delayed"
+    # was confirmed live to trigger this exact bug.
+    "dissatisfied", "unhappy", "frustration", "frustrated", "shortage",
+    "shortages", "delay", "delays", "delayed", "defect", "defects",
+    "faulty", "damaged", "working", "poor", "low", "bad", "quality",
+    "disappointed", "difficulty", "difficulties", "trouble", "troubles",
+    "grievance", "grievances", "happy", "pleased", "impressed", "love",
+    "loved", "loving", "great", "worked", "works", "well", "effective",
+    "satisfaction", "delighted", "thrilled", "wish", "wishes", "hope",
+    "hoping", "request", "requests", "requested", "see", "include",
+    "feature", "enhancement", "enhancements", "think", "thoughts",
+    "opinion", "opinions", "views", "perception", "perceptions",
+    "reaction", "reactions", "impression", "impressions", "experience",
+    "experiences",
 } | set(MONTH_MAP.keys()) | set(BUSINESS_KEYWORDS) | set(DISEASE_PEST_TERMS) | set(SALES_KEYWORDS)
 
 ALLOWED_GUARDRAIL_KEYWORDS = set([
@@ -1636,8 +1653,10 @@ def process_chat_query(user_query: str, pinecone_api_key: str, groq_api_key: str
         intent_explicit = True
 
     category_filter = SUGGESTION_CATEGORY if query_intent == "suggestion" else None
+    sales_scoped = False
     if not category_filter and query_intent == "sentiment" and any(k in query_lower for k in SALES_KEYWORDS):
         category_filter = PRODUCT_QUERY_CATEGORY
+        sales_scoped = True
 
     pc = Pinecone(api_key=pinecone_api_key)
     index = pc.Index(PINECONE_INDEX_NAME)
@@ -1696,11 +1715,15 @@ def process_chat_query(user_query: str, pinecone_api_key: str, groq_api_key: str
 
     # ── LLM-assisted fallback for genuinely ambiguous queries — only fires
     # when regex-based detection found NOTHING at all (no product, no crop,
-    # no explicit intent, and follow-up inheritance didn't fill anything
-    # in either). Never overrides anything already resolved. Whatever it
-    # proposes is validated against the real product/crop/intent lists
-    # before being trusted (see llm_assisted_query_understanding). ──
-    if not active_product and not active_crop and not intent_explicit and groq_api_key:
+    # no explicit intent, AND no sales/pricing category routing already
+    # applied — sales_scoped is a real deterministic signal that
+    # intent_explicit alone doesn't capture, and letting the LLM guess an
+    # intent here previously clobbered it, e.g. a pricing question getting
+    # silently re-routed to the Suggestions category). Never overrides
+    # anything already resolved. Whatever it proposes is validated against
+    # the real product/crop/intent lists before being trusted (see
+    # llm_assisted_query_understanding). ──
+    if not active_product and not active_crop and not intent_explicit and not sales_scoped and groq_api_key:
         llm_guess = llm_assisted_query_understanding(user_query, groq_api_key)
         if llm_guess:
             if llm_guess.get("product"):

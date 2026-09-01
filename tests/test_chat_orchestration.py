@@ -152,6 +152,35 @@ def test_pricing_is_never_detected_as_a_product(fake_pinecone_factory):
     assert state.get("context", {}).get("product") != "pricing"
 
 
+def test_delayed_is_never_detected_as_a_product(fake_pinecone_factory):
+    # Found live against the real production dataset: "delayed" — one of
+    # the Phase 4 intent-keyword-expansion words — appears verbatim in real
+    # feedback text, so the dynamic product-probe fallback mistook it for a
+    # product name on complaint queries about shipping delays.
+    fake_pinecone_factory([
+        make_record("January", "2026", "negative", "Complaint/Negative Feedback",
+                     "Shipment was delayed by two weeks."),
+    ])
+    state = vc.process_chat_query("growers are frustrated with delayed shipments", "fake-key")
+    assert state.get("context", {}).get("product") != "delayed"
+
+
+def test_sales_scoping_survives_llm_fallback_even_when_it_guesses_an_intent(fake_pinecone_factory, fake_groq_factory):
+    # Found live: a pricing query already correctly routed to Product
+    # Queries via SALES_KEYWORDS, but since that isn't "intent_explicit",
+    # the Phase 7 LLM fallback still fired, guessed intent="suggestion",
+    # and silently re-routed the query to the Suggestions category —
+    # changing the badge from Product Inquiries to Suggestions.
+    fake_groq_factory(json.dumps({"product": None, "crop": None, "intent": "suggestion"}))
+    fake_pinecone_factory([
+        make_record("January", "2026", "neutral", "Product Queries", "Grower asked about pricing for Axial."),
+    ])
+    state = vc.process_chat_query(
+        "what are growers asking about pricing?", "fake-key", groq_api_key="fake-groq-key"
+    )
+    assert state["badge"] == "💰 Product Inquiries"
+
+
 def test_wants_more_followup_passes_prior_reply_to_avoid_repetition(fake_pinecone_factory):
     fake_pinecone_factory([
         make_record("January", "2026", "positive", "Positive Feedback", "Great results with Isabion on wheat."),
