@@ -200,6 +200,16 @@ DISEASE_PEST_TERMS = [
     "collar rot", "sheath blight", "smut", "ergot", "tikka", "alternaria",
     "fusarium", "phytophthora", "sclerotinia", "botrytis",
     "nutrient deficiency", "deficiency", "chlorosis", "lodging",
+    # Agronomic conditions and disorder fragments observed polluting the
+    # live product ranking: "Early"/"Late" from Early/Late Blight,
+    # "Blossom" from blossom end rot, "Abiotic" from abiotic stress,
+    # "White" from white fly / white grub.
+    "abiotic", "biotic", "abiotic stress", "stress", "early blight",
+    "late blight", "early", "late", "blossom", "blossom drop",
+    "blossom end rot", "flower drop", "fruit drop", "shedding",
+    "white fly", "white grub", "grub", "wireworm", "sucking",
+    "germination", "sprouting", "waterlogging", "drought", "salinity",
+    "frost", "hail", "heat stress", "cold stress",
 ]
 # Flattened to individual words so multi-word phrases (e.g. "Leaf Curl Virus")
 # are still caught even though only part of the phrase matches a listed term.
@@ -933,14 +943,18 @@ def detect_product_dynamic(query_lower: str, index, pc, original_query: str = ""
         except Exception:
             continue
 
-        # Corroborate against the curated product tag, with a word-boundary
-        # match and a minimum hit count — a genuine product name dominates
-        # its own probe; a common word shows up diffusely or not at all.
+        # Corroborate against the product tags, with a word-boundary match
+        # and a minimum hit count — a genuine product name dominates its own
+        # probe; a common word shows up diffusely or not at all. Candidates
+        # count too, so a brand that is genuinely in the data but not yet in
+        # PRODUCT_LIST is still discoverable.
         pattern = re.compile(r'(?:^|,)\s*' + re.escape(cand) + r'\s*(?:,|$)', re.IGNORECASE)
-        hits = sum(
-            1 for m in probe.get("matches", [])
-            if pattern.search(str(m.get("metadata", {}).get("products", "")))
-        )
+        hits = 0
+        for m in probe.get("matches", []):
+            md = m.get("metadata", {})
+            tags = f"{md.get('products', '')},{md.get('products_candidate', '')}"
+            if pattern.search(tags):
+                hits += 1
         if hits >= MIN_PRODUCT_TAG_HITS:
             return cand
     return None
@@ -1065,9 +1079,21 @@ def _canonical_product(product: str) -> str:
 
 
 def extract_product_mentions(text: str) -> list[str]:
-    """ Tag likely product/brand names in a feedback bullet, for the ingestion-time metadata that deterministic ranking counts. Pass 1 matches the curated PRODUCT_LIST; pass 2 is a capitalized-phrase heuristic for brands not yet catalogued. Three corrections over the naive version: a catalog match that is a strict prefix of another match on the same bullet is dropped (so "Isabion Gold" no longer also credits "Isabion", which inflated base names and split variant counts); catalog entries that are ordinary English words must be capitalized in the source; and a capitalized phrase is rejected if ANY of its words is a stopword (the previous `all(...)` let "PRICE TOO HIGH" through as a brand because only "price" was listed). """
+    """Authoritative product tags: curated catalog matches ONLY.
+
+    This deliberately no longer includes the capitalized-phrase heuristic.
+    That heuristic cannot tell a brand from any other capitalized noun, and
+    in production it filled the product ranking with agronomic vocabulary —
+    12 of the top 20 "products" were things like Abiotic, Early (from
+    "Early Blight"), Late, Blossom, Flower, White (from "White Fly"), Horse
+    (from "Horse Gram") and Potash (a fragment of "Naya Potash"). A ranking
+    that reports a disease as the second most-complained-about product is
+    worse than one that omits an uncatalogued brand.
+
+    Heuristic hits are still captured, but as a separate discovery signal —
+    see extract_product_candidates.
+    """
     text_lower = text.lower()
-    seen = set()
 
     catalog_hits = []
     for product in PRODUCT_LIST:
@@ -1079,39 +1105,68 @@ def extract_product_mentions(text: str) -> list[str]:
                 continue
         catalog_hits.append(product)
 
-    # Drop any catalog hit that is a strict prefix of a longer hit.
+    # Drop any catalog hit that is a strict prefix of a longer hit, so
+    # "Isabion Gold" does not also credit "Isabion".
     filtered = [
         p for p in catalog_hits
         if not any(other != p and other.startswith(p + " ") for other in catalog_hits)
     ]
 
-    out = []
+    out, seen = [], set()
     for product in filtered:
         canonical = _canonical_product(product)
         if canonical.lower() not in seen:
             seen.add(canonical.lower())
             out.append(canonical)
+    return out
 
-    candidates = re.findall(r'\b([A-Z][a-zA-Z]{2,}(?:\s+[A-Z][a-zA-Z]{2,}){0,2})\b', text)
-    for cand in candidates:
+
+def extract_product_candidates(text: str) -> list[str]:
+    """Possible brand names NOT in the curated catalog — a discovery signal,
+    never counted as fact.
+
+    Stored in its own metadata field so an admin can review what keeps
+    appearing and promote genuine brands into PRODUCT_LIST. Keeping these
+    out of the authoritative `products` tag is what stops the ranking from
+    being polluted by ordinary capitalized nouns.
+    """
+    known = set()
+    for product in PRODUCT_LIST:
+        known.update(product.split())
+        known.add(product)
+
+    def _is_noise(w: str) -> bool:
+        return (w in PRODUCT_STOPWORDS or w in MONTH_MAP
+                or w in DISEASE_PEST_WORDS or w in GENERIC_CAPITALIZED_STOPWORDS)
+
+    out, seen = [], set()
+    for cand in re.findall(r'\b([A-Z][a-zA-Z]{2,}(?:\s+[A-Z][a-zA-Z]{2,}){0,2})\b', text):
         words = cand.split()
+        # Trim noise words off the edges rather than discarding the whole
+        # phrase: the greedy capture pairs a sentence-initial word with the
+        # real name, so "Some NewBrandX" was being thrown away entirely
+        # because of "Some".
+        while words and _is_noise(words[0].lower()):
+            words.pop(0)
+        while words and _is_noise(words[-1].lower()):
+            words.pop()
+        if not words:
+            continue
         lowered = [w.lower() for w in words]
-        # ANY stopword disqualifies the phrase, not only all-of-them.
-        if any(w in PRODUCT_STOPWORDS or w in MONTH_MAP for w in lowered):
+        # A noise word still sitting in the MIDDLE means this isn't a name.
+        if any(_is_noise(w) for w in lowered):
             continue
-        if any(w in DISEASE_PEST_WORDS for w in lowered):
+        if all(w in known for w in lowered):
+            continue  # already covered by the catalog pass
+        trimmed = " ".join(words)
+        if trimmed.lower() in ("syngenta",):
             continue
-        if any(w in GENERIC_CAPITALIZED_STOPWORDS for w in lowered):
+        if len(words) > 1 and trimmed.isupper():
             continue
-        if cand.strip().lower() in ("syngenta",):
-            continue
-        # Multi-word ALL-CAPS is shouted feedback ("PRICE TOO HIGH"), not a brand.
-        if len(words) > 1 and cand.isupper():
-            continue
-        key = cand.strip().lower()
+        key = trimmed.lower()
         if key not in seen:
             seen.add(key)
-            out.append(cand.strip())
+            out.append(trimmed)
     return out
 
 
@@ -1798,7 +1853,10 @@ def _make_metadata_payload(inferred_year, row_month, week_label, category, bulle
         ),
         "value":    bullet[:MAX_VALUE_CHARS],
         "crop":     ",".join(extract_crops(bullet)),
+        # Authoritative catalog matches — the only field ranking counts.
         "products": ",".join(extract_product_mentions(bullet)),
+        # Uncatalogued capitalized phrases, kept for admin review only.
+        "products_candidate": ",".join(extract_product_candidates(bullet)),
         "sheet":    sheet_name,
         "src_row":  int(src_row),
         "ingest_run": ingest_run,

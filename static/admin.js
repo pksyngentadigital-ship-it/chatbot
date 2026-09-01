@@ -47,6 +47,41 @@ if (ingestForm) {
   });
 }
 
+const candidatesBtn = document.getElementById("load-candidates");
+if (candidatesBtn) {
+  candidatesBtn.addEventListener("click", async () => {
+    const target = document.getElementById("candidate-report");
+    target.textContent = "Loading…";
+    try {
+      const res = await fetch("/admin/product-candidates");
+      const data = await res.json();
+      target.textContent = "";
+      const list = data.candidates || [];
+      if (!list.length) {
+        const p = document.createElement("p");
+        p.className = "status-line";
+        p.textContent = "No uncatalogued brand-like phrases found.";
+        target.appendChild(p);
+        return;
+      }
+      const ul = document.createElement("ul");
+      ul.className = "feedback-log-list";
+      list.forEach((c) => {
+        const li = document.createElement("li");
+        const n = document.createElement("span");
+        n.className = "feedback-log-time";
+        n.textContent = `${c.mentions}×`;
+        li.appendChild(n);
+        li.appendChild(document.createTextNode("  " + c.name));
+        ul.appendChild(li);
+      });
+      target.appendChild(ul);
+    } catch (err) {
+      target.textContent = err.message;
+    }
+  });
+}
+
 // Anything the parser could not use is surfaced here. Previously these
 // were silent `continue` paths, so a workbook could half-ingest while the
 // UI still reported success.

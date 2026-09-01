@@ -78,6 +78,45 @@ def test_real_products_still_survive_the_stricter_filters():
     assert "Amistar Top" in vc.extract_product_mentions("Amistar Top gave good control")
 
 
+# ── Authoritative products vs discovery candidates ──
+
+def test_product_tag_holds_only_catalog_matches():
+    # The capitalized-phrase heuristic put 12 of the live top-20 "products"
+    # in as agronomic vocabulary: Abiotic, Early (Early Blight), Late,
+    # Blossom, Flower, White (White Fly), Horse (Horse Gram) and Potash
+    # (a fragment of Naya Potash).
+    for text in [
+        "Early Blight in Tomato crop",
+        "Abiotic Stress observed in cotton",
+        "Blossom drop reported by growers",
+        "White Fly attack on cotton",
+        "Horse Gram cultivation query",
+    ]:
+        assert vc.extract_product_mentions(text) == [], text
+
+
+def test_catalog_products_are_still_tagged():
+    assert vc.extract_product_mentions("Naya Potash gave good results") == ["Naya Potash"]
+    assert vc.extract_product_mentions("Axial worked well") == ["Axial"]
+    assert vc.extract_product_mentions("Isabion Gold and Virtako applied") == ["Isabion Gold", "Virtako"]
+
+
+def test_uncatalogued_brands_are_captured_as_candidates_not_products():
+    assert vc.extract_product_mentions("Growers liked Zynora very much") == []
+    assert "Zynora" in vc.extract_product_candidates("Growers liked Zynora very much")
+
+
+def test_candidate_extraction_trims_leading_noise_words():
+    # The greedy capture pairs a sentence-initial word with the real name;
+    # rejecting the whole phrase lost the brand entirely.
+    assert vc.extract_product_candidates("Some NewBrandX product was tried") == ["NewBrandX"]
+
+
+def test_candidates_exclude_diseases_and_catalog_duplicates():
+    assert vc.extract_product_candidates("Early Blight in Tomato crop") == []
+    assert vc.extract_product_candidates("Naya Potash gave good results") == []
+
+
 def test_extract_product_mentions_excludes_syngenta_itself():
     text = "Syngenta representative visited the farm this week."
     mentions = vc.extract_product_mentions(text)
