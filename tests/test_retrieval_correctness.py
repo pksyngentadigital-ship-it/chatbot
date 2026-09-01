@@ -43,6 +43,42 @@ def test_small_result_set_is_still_described_as_a_total(fake_pinecone_factory):
     assert "a sample, NOT the complete set" not in state["user_prompt"]
 
 
+# ── The question must survive retrieval ──
+
+def test_subject_boost_blends_with_the_query_rather_than_replacing_it():
+    query = [1.0, 0.0, 0.0, 0.0]
+    subject = [0.0, 1.0, 0.0, 0.0]
+    blended = vc._blend_vectors(query, subject, vc.SUBJECT_BLEND_WEIGHT)
+
+    assert blended != query, "the subject must actually influence retrieval"
+    assert blended[1] > 0, "the subject component must be present"
+    assert blended[0] > 0, "the user's question must NOT be discarded"
+    assert blended[0] > blended[1], "the question should still outweigh the subject boost"
+    assert abs(sum(v * v for v in blended) ** 0.5 - 1.0) < 1e-9, "must be unit length"
+
+
+def test_blend_weight_keeps_the_question_dominant():
+    # Above ~0.5 the question stops mattering, which is the bug this fixes.
+    assert 0 < vc.SUBJECT_BLEND_WEIGHT < 0.5
+
+
+def test_blend_degrades_safely_on_bad_input():
+    q = [1.0, 0.0]
+    assert vc._blend_vectors(q, [], 0.5) == q
+    assert vc._blend_vectors(q, [1.0, 2.0, 3.0], 0.5) == q, "length mismatch must fall back"
+    assert vc._blend_vectors([0.0, 0.0], [0.0, 0.0], 0.5) == [0.0, 0.0], "zero vector must not divide by zero"
+
+
+def test_prompt_instructs_the_model_to_answer_the_actual_question(fake_pinecone_factory):
+    fake_pinecone_factory([
+        make_record("January", "2026", "negative", "Complaint/Negative Feedback", "Isabion packaging leaks."),
+    ])
+    state = vc.process_chat_query("what packaging problems does isabion have?", "fake-key")
+    prompt = state["system_prompt"]
+    assert "ANSWER THE QUESTION THAT WAS ASKED" in prompt
+    assert "Do NOT substitute a general overview" in prompt
+
+
 # ── Word-boundary filtering ──
 
 def test_crop_filter_does_not_match_inside_other_words():

@@ -899,6 +899,29 @@ def detect_product_dynamic(query_lower: str, index, pc, original_query: str = ""
     return None
 
 
+# How much the detected subject pulls the retrieval vector. Below ~0.5 the
+# subject barely lifts on-topic records; above it, the question's own terms
+# stop mattering — which is the behaviour being fixed.
+SUBJECT_BLEND_WEIGHT = 0.45
+
+
+def _blend_vectors(query_vec, subject_vec, subject_weight: float):
+    """Weighted blend of two embeddings, re-normalized to unit length.
+
+    Re-normalizing matters: cosine similarity is scale-invariant but some
+    index configurations use dot product, where an un-normalized blend
+    would silently change the score magnitude.
+    """
+    if not query_vec or not subject_vec or len(query_vec) != len(subject_vec):
+        return query_vec
+    w = max(0.0, min(1.0, subject_weight))
+    blended = [(1.0 - w) * q + w * s for q, s in zip(query_vec, subject_vec)]
+    norm = sum(v * v for v in blended) ** 0.5
+    if norm == 0:
+        return query_vec
+    return [v / norm for v in blended]
+
+
 def _mentions(text: str, term: str) -> bool:
     """Word-boundary containment. Bare substring matching made 'rice' match
     'price' and 'gram' match 'program' — and it was inconsistent with
@@ -1641,6 +1664,15 @@ def build_system_prompt(query_intent, timeframe_label, explicit_list_format, act
         f"{topics_clause}"
         f"{format_clause}"
         f"{structure_clause}"
+        "ANSWER THE QUESTION THAT WAS ASKED. The user's exact question is at "
+        "the end of the message below. Address that specific question first "
+        "and directly — if they asked about price, lead with price; if they "
+        "asked about packaging, lead with packaging; if they asked whether "
+        "something improved, say whether it improved. Do NOT substitute a "
+        "general overview of the subject for an answer to the question. If "
+        "the Data Context genuinely does not address what they asked, say so "
+        "in one plain sentence and then give the closest relevant information "
+        "you do have, clearly labelled as such. "
         f"Start your response with a short, clear opening line ({opening_hint}), then "
         "continue. Write so a busy reader understands the key takeaway at first glance. "
         "Do not include bracketed dates, week labels, or raw metadata tags in the output. "
@@ -2351,17 +2383,32 @@ def process_chat_query(user_query: str, pinecone_api_key: str, groq_api_key: str
                 intent_explicit = True
                 category_filter = SUGGESTION_CATEGORY if query_intent == "suggestion" else category_filter
 
+    # Subject-boosted retrieval that still respects what was actually asked.
+    #
+    # This used to REPLACE the query embedding with an embedding of the
+    # synthetic string "<subject> product feedback sentiment complaints
+    # praise". Everything specific about the question was discarded, so
+    # "is Isabion too expensive?", "what packaging problems does Isabion
+    # have?" and "how does Isabion perform on wheat?" all retrieved the
+    # same generic Isabion bullets — the single biggest reason answers felt
+    # like they ignored the question. The synthetic string also mixed
+    # opposing poles ("complaints praise"), pulling the vector toward a
+    # neutral centroid, and called a crop a "product".
+    #
+    # Now the subject vector is BLENDED with the real query vector, so the
+    # subject still lifts on-topic records while the question's own terms
+    # continue to rank.
     retrieval_vector = query_vector
     retrieval_top_k = 100
     subject_for_embed = " ".join(filter(None, [active_crop, active_product]))
     if subject_for_embed:
         try:
-            product_embed_response = pc.inference.embed(
+            subject_embed_response = pc.inference.embed(
                 model="llama-text-embed-v2",
-                inputs=[f"{subject_for_embed} product feedback sentiment complaints praise"],
+                inputs=[f"grower feedback about {subject_for_embed}"],
                 parameters={"input_type": "query", "dimension": EMBEDDING_DIMENSION}
             )
-            retrieval_vector = product_embed_response[0].values
+            retrieval_vector = _blend_vectors(query_vector, subject_embed_response[0].values, SUBJECT_BLEND_WEIGHT)
             retrieval_top_k = 300
         except Exception:
             retrieval_vector = query_vector
