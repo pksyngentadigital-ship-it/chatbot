@@ -118,3 +118,42 @@ def test_header_uses_new_default_label_when_no_date_resolved():
     header = vc.build_header("sentiment", vc.DEFAULT_TIMEFRAME_LABEL, None, [])
     assert "the requested period" not in header
     assert vc.DEFAULT_TIMEFRAME_LABEL in header
+
+
+# ── Multi-month window merge must stay representative after truncation ──
+
+def test_interleave_by_recency_starts_with_newest_month():
+    # Input is oldest-month-first; output must lead with the newest month.
+    per_month = [["old-1", "old-2"], ["mid-1", "mid-2"], ["new-1", "new-2"]]
+    merged = vc._interleave_by_recency(per_month)
+    assert merged[0] == "new-1"
+    assert merged[:3] == ["new-1", "mid-1", "old-1"]
+
+
+def test_interleave_by_recency_dedupes_case_insensitively():
+    per_month = [["Same Bullet"], ["same bullet"], ["Unique"]]
+    merged = vc._interleave_by_recency(per_month)
+    assert len(merged) == 2
+
+
+def test_interleave_by_recency_handles_uneven_and_empty_months():
+    per_month = [[], ["a1", "a2", "a3"], ["b1"]]
+    merged = vc._interleave_by_recency(per_month)
+    assert sorted(merged) == ["a1", "a2", "a3", "b1"]
+
+
+def test_relative_window_answer_is_not_dominated_by_the_oldest_month(fake_pinecone_factory):
+    # Regression: months were concatenated oldest-first and then truncated to
+    # the first MAX_BULLETS, so "the last N months" was answered using ONLY
+    # the oldest month's feedback and none of the recent ones.
+    months = [("April", "2026"), ("May", "2026"), ("June", "2026")]
+    records = []
+    for mo, yr in months:
+        for i in range(20):
+            records.append(make_record(mo, yr, "positive", "Positive Feedback", f"{mo} feedback item {i}"))
+    fake_pinecone_factory(records)
+
+    state = vc.process_chat_query("show grower feedback for the last 3 months", "fake-key")
+    shown = " ".join(state["positive_bullets"])
+    for mo, _ in months:
+        assert mo in shown, f"{mo} missing — window answer is not representative"

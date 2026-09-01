@@ -526,6 +526,21 @@ def detect_relative_window(query_lower: str) -> dict | None:
     return None
 
 
+def _interleave_by_recency(per_month_bullets: list[list[str]]) -> list[str]:
+    """ Merge per-month bullet lists (given oldest-month-first) into one list that stays representative after downstream truncation. Round-robins one bullet from each month starting with the NEWEST, so a "last N months" answer covers the whole window with a recency bias, instead of being filled entirely by whichever month happens to come first. Deduplicates case-insensitively. """
+    merged, seen = [], set()
+    newest_first = list(reversed(per_month_bullets))
+    for i in range(max((len(b) for b in newest_first), default=0)):
+        for month_bullets in newest_first:
+            if i < len(month_bullets):
+                b = month_bullets[i]
+                key = b.strip().lower()
+                if key not in seen:
+                    seen.add(key)
+                    merged.append(b)
+    return merged
+
+
 def resolve_relative_window(window: dict, index) -> tuple[list[tuple[str, str]], str] | None:
     """ Resolves a detect_relative_window() descriptor into an ordered list of (month, year) pairs to query and merge, plus a human-readable label for the response header. Anchored to the latest month/year actually in the data (see get_latest_month_year_from_index) — never the real calendar date. Returns None if the index has no dated records to anchor against. """
     latest = get_latest_month_year_from_index(index)
@@ -1889,27 +1904,23 @@ def process_chat_query(user_query: str, pinecone_api_key: str, groq_api_key: str
 
     elif relative_window:
         window_months, window_label = relative_window
-        positive_bullets, negative_bullets, neutral_bullets = [], [], []
-        seen_pos, seen_neg, seen_neut = set(), set(), set()
+        # Collect per-month first, then interleave newest-month-first (see
+        # _interleave_by_recency). Plain chronological concatenation here was
+        # a real bug: downstream truncation takes the FIRST MAX_BULLETS
+        # bullets, so "the last 6 months" was answered using only the OLDEST
+        # month in the window and none of the recent ones.
+        per_month_pos, per_month_neg, per_month_neut = [], [], []
         for w_month, w_year in window_months:
             w_pos, w_neg, w_neut = query_pinecone_for_timeframe(
                 index, retrieval_vector, w_month, w_year, detected_week, query_intent, top_k=retrieval_top_k, category_filter=category_filter
             )
-            for b in w_pos:
-                key = b.strip().lower()
-                if key not in seen_pos:
-                    seen_pos.add(key)
-                    positive_bullets.append(b)
-            for b in w_neg:
-                key = b.strip().lower()
-                if key not in seen_neg:
-                    seen_neg.add(key)
-                    negative_bullets.append(b)
-            for b in w_neut:
-                key = b.strip().lower()
-                if key not in seen_neut:
-                    seen_neut.add(key)
-                    neutral_bullets.append(b)
+            per_month_pos.append(w_pos)
+            per_month_neg.append(w_neg)
+            per_month_neut.append(w_neut)
+
+        positive_bullets = _interleave_by_recency(per_month_pos)
+        negative_bullets = _interleave_by_recency(per_month_neg)
+        neutral_bullets = _interleave_by_recency(per_month_neut)
 
         if active_product:
             positive_bullets = filter_bullets_by_product(positive_bullets, active_product)
