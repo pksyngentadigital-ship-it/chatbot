@@ -22,6 +22,7 @@ LLM, then finalize with charts/downloads):
         # result["final_reply"], result["chart"], result["downloads"]
 """
 
+import json
 import re
 import os
 from io import BytesIO
@@ -41,6 +42,13 @@ from pptx.enum.chart import XL_CHART_TYPE
 PINECONE_INDEX_NAME = "chatbot"
 EMBEDDING_DIMENSION = 384
 GROQ_MODEL = "llama-3.1-8b-instant"
+
+# Fallback timeframe label used only when a query genuinely mentions no
+# date at all — reads naturally in phrases like "Complaints of {label}:"
+# and "Sentiments of {label}:". Never say the confusing literal "the
+# requested period" back to a user who did specify a timeframe but whose
+# phrasing the date parser didn't recognize.
+DEFAULT_TIMEFRAME_LABEL = "all available feedback"
 
 MONTH_TYPO_FIX = {
     "Feburary": "February", "Febuary": "February",
@@ -214,7 +222,7 @@ PRODUCT_STOPWORDS = {
     # dynamic product-probe fallback mistakes the word itself for a product
     # name whenever a query like "what other insights..." reaches it.
     "other", "others", "another", "anything", "something", "else"
-} | set(MONTH_MAP.keys()) | set(BUSINESS_KEYWORDS) | set(DISEASE_PEST_TERMS)
+} | set(MONTH_MAP.keys()) | set(BUSINESS_KEYWORDS) | set(DISEASE_PEST_TERMS) | set(SALES_KEYWORDS)
 
 ALLOWED_GUARDRAIL_KEYWORDS = set([
     "sentiment", "sentiments", "feedback", "feedbacks", "product", "products",
@@ -420,6 +428,116 @@ def get_max_week_label(index, month, year) -> str | None:
         return max(set(weeks), key=week_num)
     except Exception:
         return None
+
+
+MONTH_ORDER_INV = {v: k for k, v in MONTH_ORDER.items()}
+
+
+def get_latest_month_year_from_index(index) -> tuple[str, str] | None:
+    """ Find the most recent (month, year) pair actually present in the ingested data — the anchor every relative-date phrase ("last month", "last quarter") resolves against. Anchored to the data, not the real calendar date, for the same reason get_latest_year_from_index is: the dataset may lag behind today, so a real-calendar "last month" could return empty even when recent data exists. """
+    try:
+        dummy_vector = [0.0] * EMBEDDING_DIMENSION
+        results = index.query(vector=dummy_vector, top_k=200, include_metadata=True)
+        pairs = []
+        for m in results.get("matches", []):
+            md = m.get("metadata", {})
+            month, year = md.get("month"), md.get("year")
+            if month in MONTH_ORDER and year and str(year).isdigit():
+                pairs.append((int(year), month))
+        if not pairs:
+            return None
+        latest_year, latest_month = max(pairs, key=lambda p: (p[0], MONTH_ORDER[p[1]]))
+        return latest_month, str(latest_year)
+    except Exception:
+        return None
+
+
+def _month_idx(month: str, year: str) -> int:
+    """Absolute month index (months since year 0) — makes month arithmetic a plain integer add/subtract instead of manual year-rollover juggling."""
+    return int(year) * 12 + (MONTH_ORDER[month] - 1)
+
+
+def _idx_to_month_year(idx: int) -> tuple[str, str]:
+    year, month0 = divmod(idx, 12)
+    return MONTH_ORDER_INV[month0 + 1], str(year)
+
+
+def detect_relative_window(query_lower: str) -> dict | None:
+    """ Detects relative time-window phrases that span MULTIPLE months — "last 30 days", "last quarter", "last 3 months", "since March" — which the exact single month/year/week matchers can't express at all today. Returns a small descriptor dict for resolve_relative_window(), or None. Note on granularity: the ingested data only carries month/week tags, no exact calendar date — so "last N days" and "last N weeks" are necessarily approximated to the nearest whole month count (round(N/30) and round(N/4) respectively). That's a real, documented limitation of the data model, not a rounding bug. """
+    m = re.search(r'\b(?:last|past)\s+(\d+)\s+days?\b', query_lower)
+    if m:
+        months_back = max(1, round(int(m.group(1)) / 30))
+        return {"kind": "last_n_months", "n": months_back}
+
+    m = re.search(r'\b(?:last|past)\s+(\d+)\s+weeks?\b', query_lower)
+    if m:
+        months_back = max(1, round(int(m.group(1)) / 4))
+        return {"kind": "last_n_months", "n": months_back}
+
+    m = re.search(r'\b(?:last|past|previous)\s+(\d+)\s+months?\b', query_lower)
+    if m:
+        return {"kind": "last_n_months", "n": int(m.group(1))}
+
+    if re.search(r'\blast\s+month\b', query_lower):
+        return {"kind": "last_n_months", "n": 1}
+
+    if re.search(r'\bthis\s+month\b|\bcurrent\s+month\b', query_lower):
+        return {"kind": "this_month"}
+
+    if re.search(r'\b(?:last|past|previous)\s+quarter\b', query_lower):
+        return {"kind": "last_quarter"}
+
+    if re.search(r'\bthis\s+quarter\b|\bcurrent\s+quarter\b', query_lower):
+        return {"kind": "this_quarter"}
+
+    m = re.search(
+        r'\bsince\s+(january|february|march|april|may|june|july|august'
+        r'|september|october|november|december'
+        r'|jan|feb|mar|apr|jun|jul|aug|sep|oct|nov|dec)\b',
+        query_lower
+    )
+    if m:
+        return {"kind": "since_month", "month": MONTH_MAP.get(m.group(1), m.group(1).capitalize())}
+
+    return None
+
+
+def resolve_relative_window(window: dict, index) -> tuple[list[tuple[str, str]], str] | None:
+    """ Resolves a detect_relative_window() descriptor into an ordered list of (month, year) pairs to query and merge, plus a human-readable label for the response header. Anchored to the latest month/year actually in the data (see get_latest_month_year_from_index) — never the real calendar date. Returns None if the index has no dated records to anchor against. """
+    latest = get_latest_month_year_from_index(index)
+    if not latest:
+        return None
+    latest_month, latest_year = latest
+    latest_idx = _month_idx(latest_month, latest_year)
+
+    kind = window["kind"]
+    if kind == "last_n_months":
+        n = max(1, window["n"])
+        idxs = list(range(latest_idx - n + 1, latest_idx + 1))
+        label = f"the last {n} month{'s' if n != 1 else ''}"
+    elif kind == "this_month":
+        idxs = [latest_idx]
+        label = f"{latest_month} {latest_year}"
+    elif kind == "last_quarter":
+        cur_q_start = (latest_idx // 3) * 3
+        q_start = cur_q_start - 3
+        idxs = list(range(q_start, q_start + 3))
+        label = "last quarter"
+    elif kind == "this_quarter":
+        cur_q_start = (latest_idx // 3) * 3
+        idxs = list(range(cur_q_start, latest_idx + 1))
+        label = "this quarter"
+    elif kind == "since_month":
+        target_idx = _month_idx(window["month"], latest_year)
+        if target_idx > latest_idx:
+            target_idx -= 12  # that month hasn't happened yet this year — use last year's
+        idxs = list(range(target_idx, latest_idx + 1))
+        label = f"since {window['month']}"
+    else:
+        return None
+
+    months = [_idx_to_month_year(i) for i in idxs]
+    return months, label
 
 
 def query_pinecone_for_timeframe(index, query_vector, month, year, week, query_intent="sentiment", top_k=100, category_filter=None):
@@ -942,7 +1060,7 @@ def build_subject_label(active_product, active_crop):
     return " + ".join(parts) if parts else None
 
 
-def build_header(query_intent, timeframe_label, active_product, periods, active_crop=None):
+def build_header(query_intent, timeframe_label, active_product, periods, active_crop=None, category_filter=None):
     """ Product/crop and comparison context always take priority over the generic 'period' heading — a product or crop query is labeled with its subject (never falls back to a generic 'sentiment overview for the period' heading), and a comparison query is clearly labeled as a comparison. """
     subject_label = build_subject_label(active_product, active_crop)
 
@@ -959,7 +1077,7 @@ def build_header(query_intent, timeframe_label, active_product, periods, active_
             return f"🔀 {subject}Sentiment Comparison: {period_join}\n\n"
 
     if subject_label:
-        suffix = f" ({timeframe_label})" if timeframe_label != "the requested period" else ""
+        suffix = f" ({timeframe_label})" if timeframe_label != DEFAULT_TIMEFRAME_LABEL else ""
         if query_intent == "complaint":
             return f"🐛 Complaints about {subject_label}{suffix}:\n\n"
         elif query_intent == "positive":
@@ -975,11 +1093,13 @@ def build_header(query_intent, timeframe_label, active_product, periods, active_
         return f"🌻 Positive Feedback of {timeframe_label}:\n\n"
     elif query_intent == "suggestion":
         return f"💡 Suggestions & Improvement Ideas for {timeframe_label}:\n\n"
+    elif category_filter == PRODUCT_QUERY_CATEGORY:
+        return f"💰 Product Inquiries of {timeframe_label}:\n\n"
     else:
         return f"🌾 Sentiments of {timeframe_label}:\n\n"
 
 
-def build_intent_badge(query_intent, active_product, periods, active_crop=None):
+def build_intent_badge(query_intent, active_product, periods, active_crop=None, category_filter=None):
     """Small colored pill label for the answer — purely cosmetic metadata, UI decides how to render it."""
     subject_label = build_subject_label(active_product, active_crop)
     if periods:
@@ -992,6 +1112,8 @@ def build_intent_badge(query_intent, active_product, periods, active_crop=None):
         return "🌻 Positive"
     if query_intent == "suggestion":
         return "💡 Suggestions"
+    if category_filter == PRODUCT_QUERY_CATEGORY:
+        return "💰 Product Inquiries"
     return "🌾 Sentiment Overview"
 
 
@@ -1461,21 +1583,41 @@ def process_chat_query(user_query: str, pinecone_api_key: str, groq_api_key: str
     complaint_keywords = [
         "complaint", "complaints", "negative feedback",
         "negative", "issues", "problems", "concerns",
-        "issue", "problem", "root cause", "root causes"
+        "issue", "problem", "root cause", "root causes",
+        # expanded — real phrasings that don't literally say "complaint"/"issue"
+        "dissatisfied", "unhappy", "frustration", "frustrated",
+        "unavailability", "shortage", "shortages", "delay", "delays",
+        "delayed", "defect", "defects", "faulty", "damaged", "not working",
+        "poor quality", "low quality", "bad experience", "disappointed",
+        "difficulty", "difficulties", "trouble", "troubles",
+        "pain point", "pain points", "grievance", "grievances",
     ]
     positive_keywords = [
         "positive feedback", "appreciation", "praise",
-        "favorable", "satisfied"
+        "favorable", "satisfied",
+        # expanded
+        "happy", "pleased", "impressed", "love", "loved", "loving",
+        "great experience", "good experience", "worked well", "works well",
+        "effective", "satisfaction", "delighted", "thrilled",
     ]
     suggestion_keywords = [
         "suggestion", "suggestions", "recommend", "recommendation",
         "recommendations", "improvement", "improvements",
-        "expectation", "expectations"
+        "expectation", "expectations",
+        # expanded
+        "would like", "wish", "wishes", "hope for", "hoping for",
+        "request", "requests", "requested", "ask for", "asking for",
+        "want to see", "should add", "should include", "feature request",
+        "enhancement", "enhancements", "could improve",
     ]
     sentiment_keywords = [
         "sentiment", "sentiments", "overall", "general",
         "overview", "analysis", "summary", "both",
-        "feedback", "feedbacks"
+        "feedback", "feedbacks",
+        # expanded — general "what do people think" style asks
+        "think", "thoughts", "opinion", "opinions", "views",
+        "perception", "perceptions", "reaction", "reactions",
+        "impression", "impressions", "experience", "experiences",
     ]
 
     query_intent = "sentiment"
@@ -1552,6 +1694,24 @@ def process_chat_query(user_query: str, pinecone_api_key: str, groq_api_key: str
         if detect_wants_more(query_lower):
             avoid_repeat_text = prior_context.get("last_reply")
 
+    # ── LLM-assisted fallback for genuinely ambiguous queries — only fires
+    # when regex-based detection found NOTHING at all (no product, no crop,
+    # no explicit intent, and follow-up inheritance didn't fill anything
+    # in either). Never overrides anything already resolved. Whatever it
+    # proposes is validated against the real product/crop/intent lists
+    # before being trusted (see llm_assisted_query_understanding). ──
+    if not active_product and not active_crop and not intent_explicit and groq_api_key:
+        llm_guess = llm_assisted_query_understanding(user_query, groq_api_key)
+        if llm_guess:
+            if llm_guess.get("product"):
+                active_product = llm_guess["product"]
+            if llm_guess.get("crop"):
+                active_crop = llm_guess["crop"]
+            if llm_guess.get("intent"):
+                query_intent = llm_guess["intent"]
+                intent_explicit = True
+                category_filter = SUGGESTION_CATEGORY if query_intent == "suggestion" else category_filter
+
     retrieval_vector = query_vector
     retrieval_top_k = 100
     subject_for_embed = " ".join(filter(None, [active_crop, active_product]))
@@ -1569,14 +1729,24 @@ def process_chat_query(user_query: str, pinecone_api_key: str, groq_api_key: str
 
     # ── Deterministic ranking path ──
     if aggregation_dimension:
-        return _resolve_ranking(aggregation_dimension, query_intent, category_filter, detected_month, detected_year, index)
+        return _resolve_ranking(aggregation_dimension, query_intent, category_filter, detected_month, detected_year, index, output_format=output_format, groq_api_key=groq_api_key)
 
     # ── Monthly trend path ──
     if wants_trend:
-        return _resolve_trend(query_intent, category_filter, active_crop, active_product, index)
+        return _resolve_trend(query_intent, category_filter, active_crop, active_product, index, output_format=output_format, groq_api_key=groq_api_key)
 
     # ── Comparison auto-detection ──
     periods = build_comparison_periods(all_months, all_years, all_weeks, index)
+
+    # ── Relative time-window detection ("last 30 days", "last quarter",
+    # "last 3 months") — only when the query didn't already pin an explicit
+    # month/year (those always take priority) and isn't already a
+    # multi-value comparison. ──
+    relative_window = None
+    if not periods and not all_months and not all_years:
+        window_desc = detect_relative_window(query_lower)
+        if window_desc:
+            relative_window = resolve_relative_window(window_desc, index)
 
     if periods:
         period_results = []
@@ -1600,6 +1770,44 @@ def process_chat_query(user_query: str, pinecone_api_key: str, groq_api_key: str
         timeframe_label = " vs ".join(p[0] for p in periods)
         positive_bullets = negative_bullets = neutral_bullets = None
         target_year = None
+
+    elif relative_window:
+        window_months, window_label = relative_window
+        positive_bullets, negative_bullets, neutral_bullets = [], [], []
+        seen_pos, seen_neg, seen_neut = set(), set(), set()
+        for w_month, w_year in window_months:
+            w_pos, w_neg, w_neut = query_pinecone_for_timeframe(
+                index, retrieval_vector, w_month, w_year, detected_week, query_intent, top_k=retrieval_top_k, category_filter=category_filter
+            )
+            for b in w_pos:
+                key = b.strip().lower()
+                if key not in seen_pos:
+                    seen_pos.add(key)
+                    positive_bullets.append(b)
+            for b in w_neg:
+                key = b.strip().lower()
+                if key not in seen_neg:
+                    seen_neg.add(key)
+                    negative_bullets.append(b)
+            for b in w_neut:
+                key = b.strip().lower()
+                if key not in seen_neut:
+                    seen_neut.add(key)
+                    neutral_bullets.append(b)
+
+        if active_product:
+            positive_bullets = filter_bullets_by_product(positive_bullets, active_product)
+            negative_bullets = filter_bullets_by_product(negative_bullets, active_product)
+            neutral_bullets = filter_bullets_by_product(neutral_bullets, active_product)
+        if active_crop:
+            positive_bullets = filter_bullets_by_crop(positive_bullets, active_crop)
+            negative_bullets = filter_bullets_by_crop(negative_bullets, active_crop)
+            neutral_bullets = filter_bullets_by_crop(neutral_bullets, active_crop)
+
+        total_found = len(positive_bullets) + len(negative_bullets) + len(neutral_bullets)
+        timeframe_label = window_label
+        target_year = None
+        period_results = None
 
     else:
         target_year = detected_year
@@ -1654,11 +1862,11 @@ def process_chat_query(user_query: str, pinecone_api_key: str, groq_api_key: str
             timeframe_parts.append(f"of {detected_month}" if detected_week else detected_month)
         if target_year:
             timeframe_parts.append(target_year)
-        timeframe_label = " ".join(timeframe_parts) or "the requested period"
+        timeframe_label = " ".join(timeframe_parts) or DEFAULT_TIMEFRAME_LABEL
         period_results = None
 
-    header = build_header(query_intent, timeframe_label, active_product, periods, active_crop)
-    badge = build_intent_badge(query_intent, active_product, periods, active_crop)
+    header = build_header(query_intent, timeframe_label, active_product, periods, active_crop, category_filter=category_filter)
+    badge = build_intent_badge(query_intent, active_product, periods, active_crop, category_filter=category_filter)
     subject_label = build_subject_label(active_product, active_crop)
     resolved_context = {"product": active_product, "crop": active_crop, "intent": query_intent}
 
@@ -1667,7 +1875,7 @@ def process_chat_query(user_query: str, pinecone_api_key: str, groq_api_key: str
             subject = f" for {subject_label}" if subject_label else ""
             reply = f"{badge}\n\n{header}No data found{subject} for the compared periods: {timeframe_label}."
         elif subject_label:
-            suffix = f" in {timeframe_label}" if timeframe_label != "the requested period" else " in the ingested dataset"
+            suffix = f" in {timeframe_label}" if timeframe_label != DEFAULT_TIMEFRAME_LABEL else " in the ingested dataset"
             reply = f"{badge}\n\n{header}No data found for '{subject_label}'{suffix}."
         elif detected_month or detected_year or detected_week:
             reply = f"{badge}\n\n{header}No data found for {timeframe_label} in the ingested dataset."
@@ -1781,6 +1989,113 @@ def call_groq(system_prompt: str, user_prompt: str, groq_api_key: str, max_token
     )
 
 
+def _strip_code_fence(raw: str) -> str:
+    """LLMs asked for raw JSON sometimes wrap it in a markdown code fence anyway — strip it before parsing."""
+    return re.sub(r'^```(?:json)?\s*|\s*```$', '', raw.strip(), flags=re.MULTILINE).strip()
+
+
+def generate_followup_suggestions(query_intent, subject_label, timeframe_label, full_response, groq_api_key, max_suggestions=3):
+    """ One extra short Groq call after a normal response finishes: propose a few genuinely different follow-up questions the user could ask next, given what was just answered. Zero grounding risk — these are proposed QUESTIONS for the user to ask, not asserted facts, so there's nothing here for the LLM to hallucinate that could mislead anyone. Always returns a list (possibly empty) and never raises — a broken suggestion call must never break or block the main answer. """
+    if not groq_api_key:
+        return []
+    try:
+        client = Groq(api_key=groq_api_key)
+        subject_bit = f" about {subject_label}" if subject_label else ""
+        prompt = (
+            f"A user just asked about {query_intent} feedback{subject_bit} for {timeframe_label}, "
+            f"and received this answer:\n\n{full_response}\n\n"
+            f"Suggest exactly {max_suggestions} short, genuinely different follow-up questions "
+            f"they could ask next about this grower-feedback dataset (e.g. a different crop, "
+            f"product, timeframe, or angle — not a rephrasing of the same question). "
+            f"Return ONLY a JSON array of {max_suggestions} short question strings, nothing else — "
+            f"no markdown, no explanation, no numbering."
+        )
+        resp = client.chat.completions.create(
+            model=GROQ_MODEL,
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.4,
+            max_tokens=200,
+        )
+        parsed = json.loads(_strip_code_fence(resp.choices[0].message.content or ""))
+        if not isinstance(parsed, list):
+            return []
+        return [str(s).strip() for s in parsed if str(s).strip()][:max_suggestions]
+    except Exception:
+        return []
+
+
+def generate_deterministic_narrative(dimension_label, top_name, top_count, bullets, groq_api_key):
+    """ Short LLM pass that adds 2-3 sentences of grounded color on top of an ALREADY-FINALIZED, deterministic ranking or trend result — called after the numbers are locked in, so it can only add narrative, never change a rank, a count, or a trend value. Grounded strictly in the real feedback bullets passed in; told explicitly to say "not clear" rather than guess if they don't explain the result. Returns "" on any failure or when there's nothing to ground it in — the numbers-only reply is always valid on its own without this. """
+    if not groq_api_key or not bullets:
+        return ""
+    try:
+        client = Groq(api_key=groq_api_key)
+        context = "\n".join(f"- {b}" for b in bullets[:8])
+        system_prompt = (
+            "You are a data analyst. You must use ONLY the feedback bullets given below — "
+            "never invent, assume, or add any detail not explicitly present in them. "
+            "Write 2-3 sentences explaining the likely reason behind this result, grounded "
+            "strictly in the bullets. If the bullets don't clearly explain why, say plainly "
+            "that the data doesn't make the reason clear, instead of guessing."
+        )
+        user_prompt = f"Top result — {dimension_label}: {top_name} ({top_count} mentions)\n\nFeedback bullets:\n{context}"
+        resp = client.chat.completions.create(
+            model=GROQ_MODEL,
+            messages=[{"role": "system", "content": system_prompt}, {"role": "user", "content": user_prompt}],
+            temperature=0.2,
+            max_tokens=150,
+        )
+        return (resp.choices[0].message.content or "").strip()
+    except Exception:
+        return ""
+
+
+def llm_assisted_query_understanding(user_query, groq_api_key):
+    """ Fallback used ONLY when regex-based detection found NOTHING at all (no product, no crop, no explicit intent) — asks the LLM to propose a product/crop/intent for a genuinely ambiguous query. CRITICAL GUARDRAIL: whatever it proposes is validated against the real PRODUCT_LIST / CROP_LIST / the fixed intent enum before being trusted — anything not in those lists is silently discarded. This is exactly the check that would have caught an LLM inventing a product name that doesn't exist (observed live during testing) before it ever reached a user; the risk here is much lower than open-ended generation because the LLM can only ever "hit" a value that's already on an approved list, never introduce a new one. Returns None on any failure or when nothing usable survives validation. """
+    if not groq_api_key:
+        return None
+    try:
+        client = Groq(api_key=groq_api_key)
+        system_prompt = (
+            "You are a query classifier for a grower-feedback chatbot. Given a vague user "
+            "question, propose the most likely product, crop, and intent it's about. "
+            'Return ONLY a JSON object: {"product": "<name or null>", "crop": "<name or null>", '
+            '"intent": "<one of: complaint, positive, suggestion, sentiment>"}. '
+            "If you are not confident about a field, use null for it. Never invent a product "
+            "or crop name — only propose one if it is a real product/crop explicitly present "
+            "in the user's own question."
+        )
+        resp = client.chat.completions.create(
+            model=GROQ_MODEL,
+            messages=[{"role": "system", "content": system_prompt}, {"role": "user", "content": user_query}],
+            temperature=0.0,
+            max_tokens=100,
+        )
+        parsed = json.loads(_strip_code_fence(resp.choices[0].message.content or ""))
+        if not isinstance(parsed, dict):
+            return None
+
+        result = {"product": None, "crop": None, "intent": None}
+
+        proposed_product = parsed.get("product")
+        if isinstance(proposed_product, str) and proposed_product.strip().lower() in PRODUCT_LIST:
+            result["product"] = proposed_product.strip().lower()
+
+        proposed_crop = parsed.get("crop")
+        if isinstance(proposed_crop, str) and proposed_crop.strip().lower() in CROP_LIST:
+            result["crop"] = proposed_crop.strip().lower()
+
+        proposed_intent = parsed.get("intent")
+        if proposed_intent in ("complaint", "positive", "suggestion", "sentiment"):
+            result["intent"] = proposed_intent
+
+        if not any(result.values()):
+            return None
+        return result
+    except Exception:
+        return None
+
+
 def finalize_normal_response(state: dict, full_response: str) -> dict:
     """ Second phase for kind="normal": once the caller has streamed the full LLM response text, compute the chart, export rows, and ready-to-serve CSV/Excel/PPTX bytes. Returns {"final_reply", "chart", "downloads"}. """
     periods = state["periods"]
@@ -1852,15 +2167,20 @@ def finalize_normal_response(state: dict, full_response: str) -> dict:
 
     final_reply = badge + "\n\n" + header + full_response
 
+    # Chart is only shown inline in the chat when the user explicitly asked
+    # for one — downloads (CSV/Excel/PPTX) keep their chart regardless,
+    # since those are opt-in via an explicit click, not shown unprompted.
+    wants_chart = state.get("output_format") == "chart"
+
     return {
         "final_reply": final_reply,
-        "chart": {"type": "bar", "title": chart_title, "labels": chart_labels, "values": chart_values},
+        "chart": {"type": "bar", "title": chart_title, "labels": chart_labels, "values": chart_values} if wants_chart else None,
         "downloads": downloads,
         "kpis": kpis,
     }
 
 
-def _resolve_ranking(aggregation_dimension, query_intent, category_filter, detected_month, detected_year, index) -> dict:
+def _resolve_ranking(aggregation_dimension, query_intent, category_filter, detected_month, detected_year, index, output_format=None, groq_api_key=None) -> dict:
     agg_filter = {}
     if detected_month:
         agg_filter["month"] = {"$eq": detected_month}
@@ -1904,6 +2224,23 @@ def _resolve_ranking(aggregation_dimension, query_intent, category_filter, detec
         + "\n".join(table_lines)
     )
 
+    # Optional narrative color on top of the already-finalized numbers above
+    # — the ranking/table/counts are already fixed by this point, so this
+    # can only add explanation, never change what was already computed.
+    top_bullets = []
+    top_name_lower = top_name.lower()
+    for m in agg_matches:
+        md = m.get("metadata", {})
+        if top_name_lower in str(md.get(field, "")).lower():
+            v = str(md.get("value", "")).strip()
+            if v and v not in top_bullets:
+                top_bullets.append(v)
+        if len(top_bullets) >= 8:
+            break
+    narrative = generate_deterministic_narrative(aggregation_dimension, top_name, top_count, top_bullets, groq_api_key)
+    if narrative:
+        reply += f"\n\n*Why {top_name} likely ranks highest:* {narrative}"
+
     labels = [n for n, _ in ranking]
     values = [c for _, c in ranking]
 
@@ -1924,16 +2261,17 @@ def _resolve_ranking(aggregation_dimension, query_intent, category_filter, detec
         "pptx": pptx_bytes,
     }
 
+    wants_chart = output_format == "chart"
     return {
         "kind": "ranking",
         "reply": reply,
         "badge": badge,
-        "chart": {"type": "bar", "title": f"{aggregation_dimension.title()} Mentions", "labels": labels, "values": values},
+        "chart": {"type": "bar", "title": f"{aggregation_dimension.title()} Mentions", "labels": labels, "values": values} if wants_chart else None,
         "downloads": downloads,
     }
 
 
-def _resolve_trend(query_intent, category_filter, active_crop, active_product, index) -> dict:
+def _resolve_trend(query_intent, category_filter, active_crop, active_product, index, output_format=None, groq_api_key=None) -> dict:
     trend_filter = {}
     if query_intent == "positive":
         trend_filter["sentiment"] = {"$eq": "positive"}
@@ -1973,6 +2311,23 @@ def _resolve_trend(query_intent, category_filter, active_crop, active_product, i
         + "\n".join(table_lines)
     )
 
+    # Optional narrative color on top of the already-finalized numbers above
+    # — grounded in real bullets from the highest month only, and generated
+    # after that month is already fixed, so it can only add explanation.
+    highest_month, highest_year = highest[0].split(" ", 1)
+    highest_bullets = []
+    for m in trend_matches:
+        md = m.get("metadata", {})
+        if md.get("month") == highest_month and md.get("year") == highest_year:
+            v = str(md.get("value", "")).strip()
+            if v and v not in highest_bullets:
+                highest_bullets.append(v)
+        if len(highest_bullets) >= 8:
+            break
+    narrative = generate_deterministic_narrative("month", highest[0], highest[1], highest_bullets, groq_api_key)
+    if narrative:
+        reply += f"\n\n*Why {highest[0]} was the strongest month:* {narrative}"
+
     labels = [l for l, _ in monthly_counts]
     values = [c for _, c in monthly_counts]
 
@@ -1997,10 +2352,11 @@ def _resolve_trend(query_intent, category_filter, active_crop, active_product, i
         "pptx": pptx_bytes,
     }
 
+    wants_chart = output_format == "chart"
     return {
         "kind": "trend",
         "reply": reply,
         "badge": "📈 Monthly Trend",
-        "chart": {"type": "line", "title": "Monthly Trend", "labels": labels, "values": values},
+        "chart": {"type": "line", "title": "Monthly Trend", "labels": labels, "values": values} if wants_chart else None,
         "downloads": downloads,
     }

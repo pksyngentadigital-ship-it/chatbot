@@ -3,7 +3,9 @@ End-to-end tests for process_chat_query / finalize_normal_response against a
 fake Pinecone backend seeded with known records — these pin down the
 observable behavior a user actually sees, not just internal helpers.
 """
-from conftest import make_record
+import json
+
+from conftest import make_record, raising_groq_factory
 import vog_core as vc
 
 
@@ -139,6 +141,17 @@ def test_other_is_never_detected_as_a_product(fake_pinecone_factory):
     assert state.get("context", {}).get("product") != "other"
 
 
+def test_pricing_is_never_detected_as_a_product(fake_pinecone_factory):
+    # Same bug class as "other": "pricing" is a real English word that
+    # shows up verbatim in feedback text, so the dynamic product-probe
+    # fallback was mistaking it for a product name on sales/pricing queries.
+    fake_pinecone_factory([
+        make_record("January", "2026", "neutral", "Product Queries", "Grower asked about pricing for Axial."),
+    ])
+    state = vc.process_chat_query("what are growers asking about pricing?", "fake-key")
+    assert state.get("context", {}).get("product") != "pricing"
+
+
 def test_wants_more_followup_passes_prior_reply_to_avoid_repetition(fake_pinecone_factory):
     fake_pinecone_factory([
         make_record("January", "2026", "positive", "Positive Feedback", "Great results with Isabion on wheat."),
@@ -168,7 +181,7 @@ def test_plain_followup_does_not_inject_continuation_clause(fake_pinecone_factor
     assert "CONTINUATION REQUEST" not in state["system_prompt"]
 
 
-def test_finalize_normal_response_produces_chart_and_downloads(fake_pinecone_factory):
+def test_finalize_normal_response_omits_chart_when_not_requested(fake_pinecone_factory):
     fake_pinecone_factory([
         make_record("January", "2026", "positive", "Positive Feedback", "Great results with Isabion."),
         make_record("January", "2026", "negative", "Complaint/Negative Feedback", "Late delivery of Isabion."),
@@ -177,9 +190,210 @@ def test_finalize_normal_response_produces_chart_and_downloads(fake_pinecone_fac
     assert state["kind"] == "normal"
 
     result = vc.finalize_normal_response(state, "Growers are mostly satisfied, though delivery was slow.")
-    assert result["chart"]["labels"] == ["Positive", "Negative", "Other"]
-    assert result["chart"]["values"] == [1, 1, 0]
+    # Plain question, no "chart"/"visualize" wording -> no chart shown inline.
+    assert result["chart"] is None
+    # Downloads are opt-in via an explicit click, so they keep their chart regardless.
     assert result["downloads"]["csv"]
     assert result["downloads"]["excel"]
     assert result["downloads"]["pptx"]
     assert "Isabion" in result["final_reply"]
+
+
+def test_finalize_normal_response_includes_chart_when_explicitly_requested(fake_pinecone_factory):
+    fake_pinecone_factory([
+        make_record("January", "2026", "positive", "Positive Feedback", "Great results with Isabion."),
+        make_record("January", "2026", "negative", "Complaint/Negative Feedback", "Late delivery of Isabion."),
+    ])
+    state = vc.process_chat_query("show me a chart of sentiment for isabion", "fake-key")
+    assert state["kind"] == "normal"
+    assert state["output_format"] == "chart"
+
+    result = vc.finalize_normal_response(state, "Growers are mostly satisfied, though delivery was slow.")
+    assert result["chart"]["labels"] == ["Positive", "Negative", "Other"]
+    assert result["chart"]["values"] == [1, 1, 0]
+
+
+def test_ranking_chart_omitted_by_default(fake_pinecone_factory):
+    fake_pinecone_factory([
+        make_record("January", "2026", "negative", "Complaint/Negative Feedback", "x", crop="Wheat"),
+        make_record("January", "2026", "negative", "Complaint/Negative Feedback", "y", crop="Cotton"),
+    ])
+    state = vc.process_chat_query("which crop generated the highest number of complaints?", "fake-key")
+    assert state["kind"] == "ranking"
+    assert state["chart"] is None
+    # Downloads (PPTX/Excel) keep their chart regardless of inline display.
+    assert state["downloads"]["pptx"]
+
+
+def test_ranking_chart_included_when_explicitly_requested(fake_pinecone_factory):
+    fake_pinecone_factory([
+        make_record("January", "2026", "negative", "Complaint/Negative Feedback", "x", crop="Wheat"),
+        make_record("January", "2026", "negative", "Complaint/Negative Feedback", "y", crop="Cotton"),
+    ])
+    state = vc.process_chat_query("show a chart of which crop generated the highest number of complaints", "fake-key")
+    assert state["kind"] == "ranking"
+    assert state["chart"] is not None
+    assert state["chart"]["labels"]
+
+
+def test_trend_chart_omitted_by_default(fake_pinecone_factory):
+    fake_pinecone_factory([
+        make_record("January", "2026", "negative", "Complaint/Negative Feedback", "a"),
+        make_record("February", "2026", "negative", "Complaint/Negative Feedback", "b"),
+    ])
+    state = vc.process_chat_query("show the monthly trend for complaints", "fake-key")
+    assert state["kind"] == "trend"
+    assert state["chart"] is None
+
+
+def test_trend_chart_included_when_explicitly_requested(fake_pinecone_factory):
+    fake_pinecone_factory([
+        make_record("January", "2026", "negative", "Complaint/Negative Feedback", "a"),
+        make_record("February", "2026", "negative", "Complaint/Negative Feedback", "b"),
+    ])
+    state = vc.process_chat_query("show a chart of the monthly trend for complaints", "fake-key")
+    assert state["kind"] == "trend"
+    assert state["chart"] is not None
+
+
+# ── Sales/pricing badge fix (Phase 4) ──
+
+def test_sales_pricing_query_gets_product_inquiries_badge(fake_pinecone_factory):
+    fake_pinecone_factory([
+        make_record("January", "2026", "neutral", "Product Queries", "Grower asked about pricing for Axial."),
+    ])
+    state = vc.process_chat_query("what are growers asking about pricing?", "fake-key")
+    assert state["kind"] == "normal"
+    assert state["badge"] == "💰 Product Inquiries"
+
+
+# ── Expanded intent keyword coverage (Phase 4) ──
+
+def test_expanded_complaint_keywords_catch_real_phrasing(fake_pinecone_factory):
+    fake_pinecone_factory([
+        make_record("January", "2026", "negative", "Complaint/Negative Feedback", "Shipment was delayed."),
+    ])
+    state = vc.process_chat_query("growers are frustrated with delayed shipments", "fake-key")
+    assert state.get("query_intent") == "complaint"
+
+
+def test_expanded_positive_keywords_catch_real_phrasing(fake_pinecone_factory):
+    fake_pinecone_factory([
+        make_record("January", "2026", "positive", "Positive Feedback", "Great results."),
+    ])
+    state = vc.process_chat_query("growers are really happy and impressed with the results", "fake-key")
+    assert state.get("query_intent") == "positive"
+
+
+def test_expanded_suggestion_keywords_catch_real_phrasing(fake_pinecone_factory):
+    fake_pinecone_factory([
+        make_record("January", "2026", "neutral", "Suggestions", "Better packaging please."),
+    ])
+    state = vc.process_chat_query("growers would like better packaging", "fake-key")
+    assert state.get("query_intent") == "suggestion"
+
+
+# ── Relative time-window end-to-end (Phase 3) ──
+
+def test_relative_window_last_n_months_merges_across_months(fake_pinecone_factory):
+    fake_pinecone_factory([
+        make_record("January", "2026", "positive", "Positive Feedback", "Great results with Isabion."),
+        make_record("February", "2026", "positive", "Positive Feedback", "Isabion worked well again."),
+        make_record("November", "2025", "positive", "Positive Feedback", "Too old to be in the window."),
+    ])
+    state = vc.process_chat_query("what do growers think about isabion in the last 2 months?", "fake-key")
+    assert state["kind"] == "normal"
+    assert state["actual_point_count"] == 2
+    assert "the last 2 months" in state["timeframe_label"]
+
+
+def test_relative_window_no_data_falls_back_gracefully(fake_pinecone_factory):
+    fake_pinecone_factory([])
+    state = vc.process_chat_query("show grower feedback for the last 3 months", "fake-key")
+    # No dated records at all in the index -> resolve_relative_window
+    # returns None -> falls through to the plain (also empty) path,
+    # never crashes.
+    assert state["kind"] == "no_data"
+
+
+# ── Ranking/trend narrative synthesis (Phase 6) ──
+
+def test_ranking_narrative_appended_when_groq_available(fake_pinecone_factory, fake_groq_factory):
+    fake_groq_factory("Wheat had more disease-related complaints this season.")
+    fake_pinecone_factory([
+        make_record("January", "2026", "negative", "Complaint/Negative Feedback", "disease issue", crop="Wheat"),
+        make_record("January", "2026", "negative", "Complaint/Negative Feedback", "disease issue 2", crop="Wheat"),
+        make_record("January", "2026", "negative", "Complaint/Negative Feedback", "z", crop="Cotton"),
+    ])
+    state = vc.process_chat_query(
+        "which crop generated the highest number of complaints?", "fake-key", groq_api_key="fake-groq-key"
+    )
+    assert state["kind"] == "ranking"
+    assert "Wheat had more disease-related complaints this season." in state["reply"]
+
+
+def test_ranking_narrative_absent_without_groq_key(fake_pinecone_factory):
+    fake_pinecone_factory([
+        make_record("January", "2026", "negative", "Complaint/Negative Feedback", "x", crop="Wheat"),
+        make_record("January", "2026", "negative", "Complaint/Negative Feedback", "y", crop="Wheat"),
+    ])
+    state = vc.process_chat_query("which crop generated the highest number of complaints?", "fake-key")
+    assert state["kind"] == "ranking"
+    assert "*Why" not in state["reply"]
+
+
+def test_ranking_narrative_failure_does_not_break_numbers(fake_pinecone_factory, monkeypatch):
+    raising_groq_factory(monkeypatch)
+    fake_pinecone_factory([
+        make_record("January", "2026", "negative", "Complaint/Negative Feedback", "x", crop="Wheat"),
+        make_record("January", "2026", "negative", "Complaint/Negative Feedback", "y", crop="Wheat"),
+    ])
+    state = vc.process_chat_query(
+        "which crop generated the highest number of complaints?", "fake-key", groq_api_key="fake-groq-key"
+    )
+    assert state["kind"] == "ranking"
+    assert "Wheat" in state["reply"]
+    assert "2 mentions" in state["reply"]
+
+
+# ── LLM-assisted query understanding fallback (Phase 7) ──
+
+def test_llm_fallback_resolves_ambiguous_query_when_regex_finds_nothing(fake_pinecone_factory, fake_groq_factory):
+    fake_groq_factory(json.dumps({"product": "isabion", "crop": None, "intent": "complaint"}))
+    fake_pinecone_factory([
+        make_record("January", "2026", "negative", "Complaint/Negative Feedback", "Late delivery of Isabion."),
+    ])
+    # Deliberately vague — contains "product" (passes the topic guardrail)
+    # but no specific product/crop/intent keyword the regex layer recognizes.
+    state = vc.process_chat_query(
+        "tell me about the biologicals product line", "fake-key", groq_api_key="fake-groq-key"
+    )
+    assert state.get("context", {}).get("product") == "isabion"
+
+
+def test_llm_fallback_never_overrides_explicit_regex_detection(fake_pinecone_factory, fake_groq_factory):
+    # Even if the LLM (implausibly) gets called, it must never override an
+    # already-resolved product from a query that explicitly names one.
+    fake_groq_factory(json.dumps({"product": "axial", "crop": None, "intent": "positive"}))
+    fake_pinecone_factory([
+        make_record("January", "2026", "positive", "Positive Feedback", "Great results with Isabion."),
+    ])
+    state = vc.process_chat_query(
+        "what do growers think about isabion?", "fake-key", groq_api_key="fake-groq-key"
+    )
+    assert state.get("context", {}).get("product") == "isabion"
+
+
+def test_llm_fallback_not_invoked_when_intent_already_explicit(fake_pinecone_factory, fake_groq_factory):
+    calls = []
+
+    def _tracking(**kwargs):
+        calls.append(1)
+        return "{}"
+
+    fake_groq_factory(_tracking)
+    fake_pinecone_factory([
+        make_record("January", "2026", "negative", "Complaint/Negative Feedback", "Late delivery."),
+    ])
+    vc.process_chat_query("what are the complaints this month?", "fake-key", groq_api_key="fake-groq-key")
+    assert calls == []

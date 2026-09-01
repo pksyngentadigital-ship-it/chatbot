@@ -150,6 +150,21 @@ function renderDownloads(container, downloadId) {
   container.appendChild(wrap);
 }
 
+function renderSuggestions(container, suggestions) {
+  if (!Array.isArray(suggestions) || suggestions.length === 0) return;
+  const wrap = document.createElement("div");
+  wrap.className = "followups";
+  suggestions.forEach((text) => {
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "followup-chip";
+    btn.textContent = text;
+    btn.addEventListener("click", () => sendQuery(text));
+    wrap.appendChild(btn);
+  });
+  container.appendChild(wrap);
+}
+
 function sendQuery(query) {
   collapseWelcome();
   addUserMessage(query);
@@ -193,6 +208,7 @@ function sendQuery(query) {
 
     renderChart(assistantWrap, data.chart);
     renderDownloads(assistantWrap, data.download_id);
+    renderSuggestions(assistantWrap, data.suggestions);
 
     scrollToBottom();
     es.close();
@@ -269,6 +285,7 @@ document.getElementById("chat-form").addEventListener("submit", (e) => {
     wrap.appendChild(body);
     renderChart(wrap, entry.chart);
     renderDownloads(wrap, entry.download_id);
+    renderSuggestions(wrap, entry.suggestions);
     log.appendChild(wrap);
   });
 

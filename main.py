@@ -26,7 +26,7 @@ PINECONE_API_KEY = os.getenv("PINECONE_API_KEY")
 SESSION_SECRET = os.getenv("SESSION_SECRET", "dev-only-secret-change-me")
 ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "admin123")
 
-APP_BUILD = "2026-08-10-v7 (server-side chat history, session-backed follow-up context)"
+APP_BUILD = "2026-09-01-v8 (relative dates, chart-on-request, follow-up suggestions, grounded ranking narrative)"
 
 app = FastAPI(title="Voice of Grower")
 app.add_middleware(SessionMiddleware, secret_key=SESSION_SECRET)
@@ -234,15 +234,23 @@ def chat(request: Request, q: str):
             # insights..." follow-up can be told what was already said and
             # avoid repeating it.
             session_data["prior_context"] = {**state["context"], "last_reply": full_response}
+
+        # Best-effort follow-up suggestions — never let a failure here
+        # affect the main answer, which is already fully delivered above.
+        suggestions = vog_core.generate_followup_suggestions(
+            state["query_intent"], state.get("subject_label"), state["timeframe_label"],
+            full_response, GROQ_API_KEY,
+        )
+
         _append_history(session_data, {
             "role": "assistant", "kind": "normal", "badge": badge,
             "content": header + full_response, "chart": result["chart"],
-            "download_id": download_id,
+            "download_id": download_id, "suggestions": suggestions,
         })
         yield _sse("final", {
             "kind": "normal", "badge": badge, "header": header,
             "reply": full_response, "chart": result["chart"],
-            "download_id": download_id,
+            "download_id": download_id, "suggestions": suggestions,
         })
 
     return StreamingResponse(event_stream(), media_type="text/event-stream", headers={

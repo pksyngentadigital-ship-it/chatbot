@@ -96,3 +96,64 @@ def fake_pinecone_factory(monkeypatch):
         return client
 
     return _factory
+
+
+class FakeGroqMessage:
+    def __init__(self, content):
+        self.content = content
+
+
+class FakeGroqChoice:
+    def __init__(self, content):
+        self.message = FakeGroqMessage(content)
+
+
+class FakeGroqResponse:
+    def __init__(self, content):
+        self.choices = [FakeGroqChoice(content)]
+
+
+class FakeGroqCompletions:
+    def __init__(self, content_or_fn):
+        self._content_or_fn = content_or_fn
+
+    def create(self, **kwargs):
+        content = self._content_or_fn(**kwargs) if callable(self._content_or_fn) else self._content_or_fn
+        return FakeGroqResponse(content)
+
+
+class FakeGroqChat:
+    def __init__(self, content_or_fn):
+        self.completions = FakeGroqCompletions(content_or_fn)
+
+
+class FakeGroqClient:
+    """content_or_fn is either a fixed response string, or a callable
+    (**kwargs) -> str for tests that need to inspect the prompt sent."""
+
+    def __init__(self, content_or_fn="[]", api_key=None):
+        self.chat = FakeGroqChat(content_or_fn)
+
+
+@pytest.fixture
+def fake_groq_factory(monkeypatch):
+    """Returns a function(content_or_fn) -> patches vog_core.Groq so any
+    call returns that fixed JSON/text content (or the result of calling
+    content_or_fn(**kwargs) if a callable is passed)."""
+
+    def _factory(content_or_fn="[]"):
+        def _ctor(api_key=None):
+            return FakeGroqClient(content_or_fn)
+
+        monkeypatch.setattr(vog_core, "Groq", _ctor)
+        return _ctor
+
+    return _factory
+
+
+def raising_groq_factory(monkeypatch):
+    """Patches vog_core.Groq so any call raises — used to verify every
+    LLM-assisted feature degrades gracefully instead of breaking."""
+    def _ctor(api_key=None):
+        raise RuntimeError("simulated Groq outage")
+    monkeypatch.setattr(vog_core, "Groq", _ctor)
