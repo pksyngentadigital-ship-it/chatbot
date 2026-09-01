@@ -118,11 +118,33 @@ def test_aggregation_reports_completeness():
         def query(self, vector, top_k=10, include_metadata=True, filter=None):
             return {"matches": [{"metadata": {"crop": "Wheat"}} for _ in range(min(self.n, top_k))]}
 
-    partial, complete = vc.fetch_matches_for_aggregation(_Idx(5000), None)
+    # Pass an explicit small page so the test doesn't have to fabricate
+    # AGGREGATION_PAGE_SIZE records to exercise the truncation branch.
+    partial, complete = vc.fetch_matches_for_aggregation(_Idx(500), None, top_k=100)
     assert complete is False, "a full page means the result set was truncated"
 
-    small, complete2 = vc.fetch_matches_for_aggregation(_Idx(3), None)
+    small, complete2 = vc.fetch_matches_for_aggregation(_Idx(3), None, top_k=100)
     assert complete2 is True
+
+
+def test_aggregation_page_size_stays_high_enough_to_be_representative():
+    # Regression guard: lowering this to 1000 caused live rankings to
+    # report "no crop tags were found" because a zero vector gives no
+    # similarity ordering, so a smaller top_k returns an arbitrary subset.
+    assert vc.AGGREGATION_PAGE_SIZE >= 10000
+
+
+def test_aggregation_errors_are_not_swallowed_into_empty_results():
+    class _Boom:
+        def query(self, **kw):
+            raise RuntimeError("index unavailable")
+
+    # Returning ([], False) here would be indistinguishable from "the
+    # dataset is genuinely empty", which is the worst way for a counting
+    # path to fail.
+    import pytest as _pytest
+    with _pytest.raises(RuntimeError):
+        vc.fetch_matches_for_aggregation(_Boom(), None)
 
 
 def test_stats_record_is_excluded_from_aggregation():
@@ -138,10 +160,12 @@ def test_stats_record_is_excluded_from_aggregation():
     assert matches[0]["metadata"]["crop"] == "Wheat"
 
 
-def test_ranking_says_lower_bound_when_the_fetch_was_capped(fake_pinecone_factory):
+def test_ranking_says_lower_bound_when_the_fetch_was_capped(monkeypatch, fake_pinecone_factory):
+    # Shrink the page rather than fabricating 10k records.
+    monkeypatch.setattr(vc, "AGGREGATION_PAGE_SIZE", 20)
     records = [
         make_record("January", "2026", "negative", "Complaint/Negative Feedback", f"x{i}", crop="Wheat")
-        for i in range(vc.AGGREGATION_PAGE_SIZE + 10)
+        for i in range(50)
     ]
     fake_pinecone_factory(records)
     state = vc.process_chat_query("which crop generated the highest number of complaints?", "fake-key")

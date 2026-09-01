@@ -1089,14 +1089,21 @@ def detect_aggregation_request(query_lower: str) -> str | None:
     return 'crop' if crop_subject else 'product'
 
 
-# Pinecone's per-query top_k is materially lower when metadata is included
-# than the 10000 the previous code requested, and there was no check for
-# whether the result had been capped — so a partial, arbitrarily-selected
-# subset was being reported as an exhaustive census ("Based on N matched
-# records..."). Page instead, and tell the caller when the data is
-# nonetheless incomplete so the reply can say "sample" rather than "total".
-AGGREGATION_PAGE_SIZE = 1000
-AGGREGATION_MAX_RECORDS = 10000
+# Ask for as much as the index will return in one call.
+#
+# This was briefly lowered to 1000 on the theory that Pinecone caps top_k
+# harder when metadata is included. That was wrong for this deployment and
+# caused a real regression: a zero vector carries no similarity signal, so
+# a smaller top_k returns an arbitrary subset rather than a representative
+# one — and the 1000 that came back happened to contain no crop/product
+# tags at all, turning "which crop generated the most complaints" into
+# "no crop tags were found". Measured behaviour here is ~2300 records
+# returned at top_k=10000, so keep it high.
+#
+# `complete` is still reported, because if the result set ever DOES hit the
+# ceiling then every count derived from it is a lower bound and the reply
+# must say so rather than presenting it as a census.
+AGGREGATION_PAGE_SIZE = 10000
 
 
 _WORD_NUMBERS = {
@@ -1130,20 +1137,19 @@ def fetch_matches_for_aggregation(index, filter_conditions, top_k=None):
 def _fetch_aggregation_page(index, filter_conditions, top_k=None):
     page = top_k or AGGREGATION_PAGE_SIZE
     dummy_vector = [0.0] * EMBEDDING_DIMENSION
-    try:
-        results = index.query(
-            vector=dummy_vector, top_k=page, include_metadata=True,
-            filter=filter_conditions if filter_conditions else None
-        )
-    except Exception:
-        return [], False
-
-    matches = [
-        m for m in results.get("matches", [])
-        if not (m.get("metadata") or {}).get("is_stats_record")
-    ]
-    # If the page came back full, the result set was truncated.
-    complete = len(results.get("matches", [])) < page
+    # Deliberately NOT wrapped in try/except: a swallowed error here is
+    # indistinguishable from "the dataset genuinely has nothing", which is
+    # the worst possible way for a counting path to fail. Let it propagate
+    # so the caller reports it with a reference id.
+    results = index.query(
+        vector=dummy_vector, top_k=page, include_metadata=True,
+        filter=filter_conditions if filter_conditions else None
+    )
+    raw = results.get("matches", [])
+    matches = [m for m in raw if not (m.get("metadata") or {}).get("is_stats_record")]
+    # A full page means the result set was cut off, so any count derived
+    # from it is a lower bound rather than a total.
+    complete = len(raw) < page
     return matches, complete
 
 
