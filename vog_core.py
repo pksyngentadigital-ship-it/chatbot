@@ -41,7 +41,7 @@ from pptx.enum.chart import XL_CHART_TYPE
 # ==========================================
 PINECONE_INDEX_NAME = "chatbot"
 EMBEDDING_DIMENSION = 384
-GROQ_MODEL = "llama-3.1-8b-instant"
+GROQ_MODEL = "llama-3.3-70b-versatile"
 
 # Fallback timeframe label used only when a query genuinely mentions no
 # date at all — reads naturally in phrases like "Complaints of {label}:"
