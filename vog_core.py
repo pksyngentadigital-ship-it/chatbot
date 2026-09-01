@@ -114,27 +114,64 @@ EMPTY_VALUES = {
     'not filled', 'not available', 'no data', '0', 'tbd', 'pending'
 }
 
-# Known products — matched first (fast path). Extend freely.
-PRODUCT_LIST = [
-    # Verified against the real Naya Savera / Syngenta product catalog
-    # (nayasavera.online) — both branded products and generic
-    # active-ingredient names sold there.
-    "cropwise", "quantis", "isabion", "isabion gold", "allymax", "axial",
-    "walter", "walter super", "solubor", "amistar", "amistar top",
-    "incipio", "simodis", "solvigo", "rifit", "logran", "cruiser", "enrich",
-    "virtako", "proclaim", "thiovit", "thiovit jet", "thiovet",
-    "pendimethalin", "polytrin", "polytrin c", "chlorpyrifos", "glyphosate",
-    "tilt", "actara", "alika", "ridomil", "score", "folicur", "miraculan",
-    "dual gold", "naya potash", "naya npk", "naya sop",
-    "naya sulphate of potash", "naya s urea", "naya zinc plus", "promix",
-    "promix npk", "karate", "dynasty", "dynasty cst", "buprofezin",
-    "topas", "orondis", "orondis opti", "miravis", "miravis duo",
-    "primextra", "primextra gold", "voliam flexi", "vibrance",
-    "vibrance premium", "vibrance duo", "pyriproxyfin", "polo", "plenum",
-    "revus", "revus start", "copper oxychloride", "metribuzin", "match",
-    "gengwei", "bromoxynil", "dumei", "curacron", "bifenthrin", "ampligo",
-    "acephate", "dragon", "elestal", "elestal neo"
+# ── PRODUCT MASTER ──
+# Source of truth: Syngenta Pakistan Limited "Product Price List",
+# dated 8-Jun-2026. Formulation suffixes (25 WG, 500 EC, 150 ZC, ...) are
+# stripped because feedback names the brand, not the SKU. Where the price
+# list carries only a variant ("AXIAL XL", "WALTER SUPER", "THIOVIT JET"),
+# the bare brand is listed too, since growers routinely drop the suffix —
+# extract_product_mentions drops a base name when a longer variant also
+# matches, so this cannot double-count.
+PRICE_LIST_PRODUCTS = [
+    # Insecticides
+    "actara", "ampligo", "bifenthrin", "curacron", "dumei", "incipio",
+    "karate", "match", "plenum", "solvigo", "polytrin", "polytrin c",
+    "proclaim", "pyriproxyfin", "simodis", "virtako", "polo",
+    "voliam flexi",
+    # Public-health insecticides
+    "advion", "advion cockroach gel bait", "exsectra", "icon", "klerat",
+    "klerat wb", "optigard", "optigard ant gel bait", "zyrox",
+    "zyrox fly granular bait",
+    # Herbicides
+    "ally max", "allymax", "axial", "axial xl", "bromoxynil", "mcpa",
+    "dual gold", "pendimethalin", "gengwei", "glyphosate", "logran",
+    "machete", "metribuzin", "primextra", "primextra gold", "rifit",
+    "walter", "walter super", "winsta",
+    # Fungicides
+    "amistar", "amistar top", "copper oxychloride", "dragon", "miravis",
+    "miravis duo", "revus", "revus start", "revus start pepite",
+    "orondis", "orondis opti", "score", "thiovit", "thiovit jet", "tilt",
+    "topas",
+    # Seed care
+    "cruiser", "dynasty", "dynasty cst", "vibrance", "vibrance duo",
+    "vibrance premium",
+    # Micronutrients / biostimulants
+    "cultar", "naya zinc plus", "solubor", "enrich", "isabion",
+    "isabion gold", "quantis", "promix",
+    # Fertilizer
+    "naya npk", "naya potash", "naya sop", "naya s urea",
+    "sulphate of potash", "sop",
 ]
+
+# Names that are NOT crop-protection SKUs and so are absent from the CP
+# price list, but that growers demonstrably discuss — Cropwise is the
+# Syngenta grower app and is one of the most-mentioned subjects in the
+# ingested feedback. Dropping it would lose real signal, so it is kept
+# here, explicitly separated from the price-list master rather than
+# quietly mixed into it.
+NON_CP_KNOWN_PRODUCTS = [
+    "cropwise", "naya savera", "nayasavera",
+]
+
+# Seen in historical feedback but NOT in the 8-Jun-2026 price list —
+# discontinued, renamed, or from another portfolio. Kept so older records
+# still resolve; remove any that should no longer be recognized.
+LEGACY_PRODUCTS = [
+    "alika", "ridomil", "folicur", "miraculan", "elestal", "elestal neo",
+    "chlorpyrifos", "acephate", "buprofezin", "thiovet",
+]
+
+PRODUCT_LIST = PRICE_LIST_PRODUCTS + NON_CP_KNOWN_PRODUCTS + LEGACY_PRODUCTS
 
 # Known crops — matched first (fast path) for crop-wise analysis / filtering.
 CROP_LIST = [
@@ -1066,14 +1103,23 @@ PRODUCT_STOPWORDS |= GENERIC_CAPITALIZED_STOPWORDS
 # Match, and "NPS score dropped" as Score. They only count as products when
 # capitalized in the source text.
 AMBIGUOUS_PRODUCT_WORDS = {
+    # Brand names that are also ordinary English words. Matching these
+    # case-insensitively tagged "did not match the description" as Match
+    # and "NPS score dropped" as Score, so they only count as products when
+    # capitalized in the source text.
     "match", "score", "enrich", "dragon", "tilt", "polo", "walter",
     "cruiser", "karate", "dynasty", "revus", "plenum",
+    # Added with the 8-Jun-2026 price list.
+    "icon", "machete", "sop",
 }
+
+
+_UPPERCASE_PRODUCT_TOKENS = {"sop", "cst", "npk", "xl", "wb", "mcpa", "s"}
 
 
 def _canonical_product(product: str) -> str:
     return " ".join(
-        w.upper() if w.lower() in ("sop", "cst", "npk") else w.capitalize()
+        w.upper() if w.lower() in _UPPERCASE_PRODUCT_TOKENS else w.capitalize()
         for w in product.split()
     )
 

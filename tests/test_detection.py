@@ -98,7 +98,8 @@ def test_product_tag_holds_only_catalog_matches():
 def test_catalog_products_are_still_tagged():
     assert vc.extract_product_mentions("Naya Potash gave good results") == ["Naya Potash"]
     assert vc.extract_product_mentions("Axial worked well") == ["Axial"]
-    assert vc.extract_product_mentions("Isabion Gold and Virtako applied") == ["Isabion Gold", "Virtako"]
+    # Tag order is not meaningful — these are counted independently.
+    assert set(vc.extract_product_mentions("Isabion Gold and Virtako applied")) == {"Isabion Gold", "Virtako"}
 
 
 def test_uncatalogued_brands_are_captured_as_candidates_not_products():
@@ -115,6 +116,47 @@ def test_candidate_extraction_trims_leading_noise_words():
 def test_candidates_exclude_diseases_and_catalog_duplicates():
     assert vc.extract_product_candidates("Early Blight in Tomato crop") == []
     assert vc.extract_product_candidates("Naya Potash gave good results") == []
+
+
+# ── Product master (Syngenta Pakistan price list, 8-Jun-2026) ──
+
+def test_catalog_has_no_duplicates_or_crop_clashes():
+    assert len(vc.PRODUCT_LIST) == len(set(vc.PRODUCT_LIST)), "duplicate catalog entries"
+    clash = set(vc.PRODUCT_LIST) & set(vc.CROP_LIST)
+    assert not clash, f"a name cannot be both a product and a crop: {clash}"
+
+
+def test_price_list_brands_are_recognized():
+    # One per section of the price list.
+    samples = {
+        "Actara gave good control": "Actara",            # insecticide
+        "Ally Max applied to wheat": "Ally Max",          # herbicide
+        "Amistar Top sprayed": "Amistar Top",             # fungicide
+        "Dynasty CST seed treatment": "Dynasty CST",      # seed care
+        "Quantis improved stress tolerance": "Quantis",   # biostimulant
+        "Naya S Urea delivered late": "Naya S Urea",      # fertilizer
+        "Klerat WB used for rodents": "Klerat WB",        # public health
+    }
+    for text, expected in samples.items():
+        assert expected in vc.extract_product_mentions(text), text
+
+
+def test_variant_suffixes_are_uppercased_not_title_cased():
+    assert vc.extract_product_mentions("AXIAL XL performed well") == ["Axial XL"]
+    assert vc.extract_product_mentions("Naya SOP arrived") == ["Naya SOP"]
+
+
+def test_newly_ambiguous_price_list_names_need_capitalization():
+    # "Icon" and "Machete" are real brands but also ordinary words.
+    assert vc.extract_product_mentions("the icon on the app is unclear") == []
+    assert vc.extract_product_mentions("Icon 10 CS was applied") == ["Icon"]
+
+
+def test_cropwise_survives_even_though_it_is_not_a_price_list_sku():
+    # Cropwise is the grower app, not a crop-protection product, so it is
+    # absent from the CP price list — but it is one of the most-discussed
+    # subjects in the feedback and must still resolve.
+    assert "Cropwise" in vc.extract_product_mentions("The Cropwise app is very useful")
 
 
 def test_extract_product_mentions_excludes_syngenta_itself():
