@@ -26,7 +26,7 @@ PINECONE_API_KEY = os.getenv("PINECONE_API_KEY")
 SESSION_SECRET = os.getenv("SESSION_SECRET", "dev-only-secret-change-me")
 ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "admin123")
 
-APP_BUILD = "2026-09-01-v8 (relative dates, chart-on-request, follow-up suggestions, grounded ranking narrative)"
+APP_BUILD = "2026-09-01-v9 (gpt-oss-20b model, live-QA fixes for pricing/delayed false-positives)"
 
 app = FastAPI(title="Voice of Grower")
 app.add_middleware(SessionMiddleware, secret_key=SESSION_SECRET)
@@ -292,19 +292,3 @@ def download(download_id: str, kind: str):
 @app.get("/health")
 def health():
     return {"status": "ok", "build": APP_BUILD}
-
-
-# TEMPORARY diagnostic — lists the model ids Groq's API currently
-# considers available for this account's key, so we can pick a real,
-# non-deprecated model instead of guessing. Read-only, no key exposure.
-# Remove once the model outage is confirmed resolved.
-@app.get("/debug/groq-models")
-def debug_groq_models():
-    if not GROQ_API_KEY:
-        return {"error": "no Groq key configured"}
-    try:
-        client = vog_core.Groq(api_key=GROQ_API_KEY)
-        models = client.models.list()
-        return {"models": sorted(m.id for m in models.data)}
-    except Exception as e:
-        return {"error": str(e)}
