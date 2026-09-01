@@ -187,7 +187,19 @@ DISEASE_PEST_TERMS = [
     "nematode", "nematodes", "weed", "weeds", "fungus", "fungal", "bacterial",
     "bacteria", "larvae", "larva", "infestation", "infestations", "scab",
     "canker", "leaf spot", "leaf curl", "yellowing", "stunting", "wilting",
-    "disease", "diseases", "pest", "pests"
+    "disease", "diseases", "pest", "pests",
+    # Pests that actually appear in this dataset. "Jassid" was ranking as
+    # the single most-mentioned "product" in production purely because it
+    # was missing from this list.
+    "jassid", "jassids", "mealy", "mealybug", "mealybugs", "mealy bug",
+    "bollworm", "bollworms", "pink bollworm", "american bollworm",
+    "stem borer", "shoot borer", "fruit borer", "leaf miner", "leafminer",
+    "grasshopper", "grasshoppers", "locust", "locusts", "cutworm",
+    "cutworms", "semilooper", "semiloopers", "looper", "loopers",
+    "anthracnose", "gummy stem blight", "damping off", "root rot",
+    "collar rot", "sheath blight", "smut", "ergot", "tikka", "alternaria",
+    "fusarium", "phytophthora", "sclerotinia", "botrytis",
+    "nutrient deficiency", "deficiency", "chlorosis", "lodging",
 ]
 # Flattened to individual words so multi-word phrases (e.g. "Leaf Curl Virus")
 # are still caught even though only part of the phrase matches a listed term.
@@ -277,7 +289,12 @@ PRODUCT_STOPWORDS = {
     # excluded here too or the dynamic product-probe fallback would just
     # re-confirm it as a "product" anyway.
     "kaho",
-} | set(MONTH_MAP.keys()) | set(BUSINESS_KEYWORDS) | set(DISEASE_PEST_TERMS) | set(SALES_KEYWORDS)
+} | set(MONTH_MAP.keys()) | set(BUSINESS_KEYWORDS) | set(DISEASE_PEST_TERMS) | set(SALES_KEYWORDS) | set(CROP_LIST) | {
+    # A crop is never a product. "Anthracnose in Chilli crop" was tagging
+    # Chilli as a brand, which then competed with real products in the
+    # product ranking.
+    w for crop in CROP_LIST for w in crop.split()
+}
 
 ALLOWED_GUARDRAIL_KEYWORDS = set([
     "sentiment", "sentiments", "feedback", "feedbacks", "product", "products",
@@ -950,6 +967,12 @@ GENERIC_CAPITALIZED_STOPWORDS = {
     "recently", "generally", "specifically", "basically", "actually",
     "certainly", "definitely", "probably", "possibly", "apparently",
     "clearly", "obviously", "importantly", "essentially",
+    # Agronomy-advice vocabulary that reads as a capitalized noun phrase in
+    # this dataset ("Solution for jassid in cotton") but is never a brand.
+    "solution", "solutions", "control", "management", "treatment",
+    "dosage", "dose", "spray", "application", "recommendation", "advisory",
+    "attack", "damage", "stage", "crop", "field", "farmer", "farmers",
+    "grower", "growers", "market", "dealer", "retailer", "distributor",
 }
 PRODUCT_STOPWORDS |= GENERIC_CAPITALIZED_STOPWORDS
 

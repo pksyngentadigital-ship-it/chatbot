@@ -49,6 +49,35 @@ def test_extract_product_mentions_excludes_diseases_and_pests():
     assert "Score" in mentions
 
 
+def test_pests_in_this_dataset_are_never_products():
+    # "Jassid" was ranking as the single most-mentioned product in
+    # production — 60 mentions — purely because it was missing from
+    # DISEASE_PEST_TERMS.
+    for text in [
+        "Jassid attack in cotton crop",
+        "Mealy bug and Jassid problem",
+        "Pink Bollworm damage in cotton",
+        "Anthracnose in Chilli crop",
+    ]:
+        assert vc.extract_product_mentions(text) == [], text
+
+
+def test_agronomy_advice_words_are_never_products():
+    assert vc.extract_product_mentions("Solution for Jassid and whitefly in cotton") == []
+    assert vc.extract_product_mentions("Dosage and Application details needed") == []
+
+
+def test_a_crop_is_never_tagged_as_a_product():
+    assert vc.extract_product_mentions("Anthracnose in Chilli crop") == []
+    products = vc.extract_product_mentions("Tilt applied on Rice gave good results")
+    assert products == ["Tilt"], f"crop leaked into products: {products}"
+
+
+def test_real_products_still_survive_the_stricter_filters():
+    assert "Isabion" in vc.extract_product_mentions("Excellent results with Isabion on wheat")
+    assert "Amistar Top" in vc.extract_product_mentions("Amistar Top gave good control")
+
+
 def test_extract_product_mentions_excludes_syngenta_itself():
     text = "Syngenta representative visited the farm this week."
     mentions = vc.extract_product_mentions(text)
