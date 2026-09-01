@@ -1,0 +1,62 @@
+name: CI
+
+# Runs the suite on every push and PR. Previously the tests only ran when
+# someone remembered to run them locally, so nothing stopped a regression
+# from reaching production — Render deploys straight off main.
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pytest
+
+      - name: Verify the app imports
+        env:
+          GROQ_API_KEY: dummy
+          PINECONE_API_KEY: dummy
+          ADMIN_PASSWORD: dummy-ci-password
+          SESSION_SECRET: dummy-ci-session-secret-not-used-anywhere
+        run: python -c "import main, vog_core, shared_state; print('imports OK')"
+
+      - name: Run tests
+        run: python -m pytest -q
+
+      - name: Check templates render
+        run: |
+          python - <<'PY'
+          from jinja2 import Environment, FileSystemLoader
+          env = Environment(loader=FileSystemLoader("templates"))
+          env.get_template("chat.html").render(
+              suggested_prompts=["a"], app_build="ci", history_json="[]")
+          for auth in (True, False):
+              env.get_template("admin.html").render(
+                  authenticated=auth, error=None, app_build="ci",
+                  admin_enabled=True, feedback_log=[], feedback_durable=False)
+          print("templates OK")
+          PY
+
+      - name: Guard against reintroduced credential defaults
+        run: |
+          if grep -rn --include="*.py" -E '"admin123"|dev-only-secret-change-me' .; then
+            echo "::error::A hardcoded credential default was reintroduced."
+            exit 1
+          fi
+          echo "no hardcoded credential defaults"

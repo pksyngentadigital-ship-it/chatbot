@@ -55,7 +55,7 @@ if not ADMIN_ENABLED:
 MAX_QUERY_CHARS = 500
 MAX_UPLOAD_BYTES = 10 * 1024 * 1024  # 10 MB
 
-APP_BUILD = "2026-09-02-v10 (hardening: fail-safe creds, rate limits, sanitized render, vendored assets)"
+APP_BUILD = "2026-09-02-v11 (audit remediation: ingestion correctness, true counts, hardening, CI + heartbeat)"
 
 app = FastAPI(title="Voice of Grower")
 app.add_middleware(

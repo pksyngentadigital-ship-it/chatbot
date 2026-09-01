@@ -1,6 +1,7 @@
 import streamlit as st
 import pandas as pd
 from dotenv import load_dotenv
+import hmac
 import os
 
 import vog_core
@@ -33,9 +34,15 @@ with st.sidebar:
     st.markdown("---")
     st.subheader("🔑 Admin Panel")
     if not st.session_state.authenticated:
+        # Read from secrets/env with NO fallback. This previously compared
+        # against a hardcoded "admin123" that is committed to a public
+        # repository, so the password for this deployment was published.
+        _expected = st.secrets.get("ADMIN_PASSWORD", os.getenv("ADMIN_PASSWORD", ""))
         admin_password = st.text_input("Enter Password", type="password")
         if st.button("Login"):
-            if admin_password == "admin123":
+            if not _expected:
+                st.error("Admin is disabled: ADMIN_PASSWORD is not configured for this deployment.")
+            elif hmac.compare_digest(admin_password, _expected):
                 st.session_state.authenticated = True
                 st.rerun()
             else:

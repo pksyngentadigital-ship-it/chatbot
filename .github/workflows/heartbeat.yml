@@ -1,0 +1,25 @@
+name: Heartbeat
+
+# Asks production a real question every 30 minutes and fails the run if the
+# model does not actually answer. /health alone cannot catch this: during
+# the 2026-09-01 Groq model retirement it returned 200 throughout while
+# every chat reply was failing.
+#
+# A failed run shows up in the Actions tab and emails the repo owner by
+# default. Point a proper alerting channel at it if you want paging.
+on:
+  schedule:
+    - cron: "*/30 * * * *"
+  workflow_dispatch:
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Probe the live chat endpoint
+        run: python scripts/heartbeat.py --url "${{ vars.APP_URL || 'https://voice-of-grower.onrender.com' }}"

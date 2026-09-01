@@ -1,13 +1,30 @@
-streamlit
-pandas
-openpyxl
-pinecone
-requests
-groq
-python-dotenv
-python-pptx
-fastapi
-uvicorn[standard]
-jinja2
-python-multipart
-itsdangerous
+# Pinned exactly. Previously every entry was unpinned, so Render resolved
+# fresh versions on each deploy — an unrelated one-line change could pull a
+# breaking major (pandas 3.x and starlette 1.x both already resolved here)
+# and take down ingestion with no rollback target.
+#
+# Streamlit was removed: main.py never imported it. It existed only for the
+# deleted legacy app.py, and pulled tornado/pyarrow/altair into every cold
+# build on the free tier.
+
+fastapi==0.141.1
+starlette==1.6.0
+uvicorn[standard]==0.52.4
+jinja2==3.1.6
+python-multipart==0.0.32
+itsdangerous==2.2.0
+pydantic==2.13.5
+
+pandas==3.0.5
+openpyxl==3.1.5
+python-pptx==1.0.2
+
+pinecone==9.1.0
+groq==1.7.0
+python-dotenv==1.2.3
+requests==2.32.5
+
+# Optional: enables durable, multi-instance-safe session/download/feedback
+# state when REDIS_URL is set. Without it the app falls back to in-process
+# storage, which is lost on every restart.
+redis==8.1.0
