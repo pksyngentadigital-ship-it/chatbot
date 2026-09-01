@@ -925,76 +925,6 @@ def detect_product_known(query_lower: str) -> str | None:
     return products[0] if products else None
 
 
-# A candidate must look like a brand rather than an ordinary word before it
-# is worth probing at all, and it must then be corroborated by the curated
-# `products` metadata tag rather than by appearing anywhere in free text.
-MAX_DYNAMIC_CANDIDATES = 3
-MAX_QUERY_WORDS_FOR_PROBE = 30
-MIN_PRODUCT_TAG_HITS = 2
-
-
-def _dynamic_candidates(query_lower: str, original_query: str) -> list[str]:
-    """Candidate ordering for the dynamic probe: longest first (a brand name
-    is usually the most distinctive token in the sentence), and capitalized-
-    in-the-original tokens preferred, since real product names are written
-    as proper nouns. Deliberately NOT query order — that made a leading verb
-    like "provided" outrank the actual product name."""
-    words = re.findall(r'\b[a-zA-Z]{4,}\b', query_lower)
-    seen, cands = set(), []
-    capitalized = {w.lower() for w in re.findall(r'\b[A-Z][a-zA-Z]{3,}\b', original_query)}
-    for w in words:
-        if w in PRODUCT_STOPWORDS or w in seen:
-            continue
-        seen.add(w)
-        cands.append(w)
-    cands.sort(key=lambda w: (w in capitalized, len(w)), reverse=True)
-    return cands
-
-
-def detect_product_dynamic(query_lower: str, index, pc, original_query: str = "") -> str | None:
-    """ Fallback path for products NOT in PRODUCT_LIST. Confirms a candidate against the curated `products` metadata tag written at ingestion — NOT against raw feedback text. The old substring-in-free-text test confirmed almost any common English word, because in a corpus made entirely of grower feedback nearly every word appears somewhere; that produced a steady stream of false products ("other", "pricing", "delayed", "farmers", and — from the app's own suggested prompts — "provided" and "past"). Also bounded: at most MAX_DYNAMIC_CANDIDATES probes, skipped entirely for long queries, and all candidate embeddings requested in ONE batched call rather than one round trip per word. """
-    if not query_lower.strip():
-        return None
-    # A long query is prose, not a product lookup — and probing it used to
-    # mean one embedding call plus one vector query per word.
-    if len(re.findall(r'\b\w+\b', query_lower)) > MAX_QUERY_WORDS_FOR_PROBE:
-        return None
-
-    candidates = _dynamic_candidates(query_lower, original_query or query_lower)[:MAX_DYNAMIC_CANDIDATES]
-    if not candidates:
-        return None
-
-    try:
-        embed_response = pc.inference.embed(
-            model="llama-text-embed-v2",
-            inputs=[f"{c} product feedback sentiment" for c in candidates],
-            parameters={"input_type": "query", "dimension": EMBEDDING_DIMENSION}
-        )
-        vectors = [item.values for item in embed_response]
-    except Exception:
-        return None
-
-    for cand, vector in zip(candidates, vectors):
-        try:
-            probe = index.query(vector=vector, top_k=50, include_metadata=True)
-        except Exception:
-            continue
-
-        # Corroborate against the product tags, with a word-boundary match
-        # and a minimum hit count — a genuine product name dominates its own
-        # probe; a common word shows up diffusely or not at all. Candidates
-        # count too, so a brand that is genuinely in the data but not yet in
-        # PRODUCT_LIST is still discoverable.
-        pattern = re.compile(r'(?:^|,)\s*' + re.escape(cand) + r'\s*(?:,|$)', re.IGNORECASE)
-        hits = 0
-        for m in probe.get("matches", []):
-            md = m.get("metadata", {})
-            tags = f"{md.get('products', '')},{md.get('products_candidate', '')}"
-            if pattern.search(tags):
-                hits += 1
-        if hits >= MIN_PRODUCT_TAG_HITS:
-            return cand
-    return None
 
 
 # How much the detected subject pulls the retrieval vector. Below ~0.5 the
@@ -1125,19 +1055,18 @@ def _canonical_product(product: str) -> str:
 
 
 def extract_product_mentions(text: str) -> list[str]:
-    """Authoritative product tags: curated catalog matches ONLY.
+    """Product tags: matches against the curated catalog, and nothing else.
 
-    This deliberately no longer includes the capitalized-phrase heuristic.
-    That heuristic cannot tell a brand from any other capitalized noun, and
-    in production it filled the product ranking with agronomic vocabulary —
-    12 of the top 20 "products" were things like Abiotic, Early (from
-    "Early Blight"), Late, Blossom, Flower, White (from "White Fly"), Horse
-    (from "Horse Gram") and Potash (a fragment of "Naya Potash"). A ranking
-    that reports a disease as the second most-complained-about product is
-    worse than one that omits an uncatalogued brand.
+    There is no guessing step. A capitalized-phrase heuristic used to run
+    alongside this and write into the same tag; it cannot tell a brand from
+    any other capitalized noun, and in production it filled the ranking
+    with agronomic vocabulary — 12 of the top 20 "products" were things
+    like Abiotic, Early (from "Early Blight"), Blossom, White (from "White
+    Fly") and Potash (a fragment of "Naya Potash").
 
-    Heuristic hits are still captured, but as a separate discovery signal —
-    see extract_product_candidates.
+    With PRODUCT_LIST now derived from the official price list, the catalog
+    IS the source of truth: a new product enters the system by being added
+    to the price list and re-ingested, not by being inferred from text.
     """
     text_lower = text.lower()
 
@@ -1166,54 +1095,6 @@ def extract_product_mentions(text: str) -> list[str]:
             out.append(canonical)
     return out
 
-
-def extract_product_candidates(text: str) -> list[str]:
-    """Possible brand names NOT in the curated catalog — a discovery signal,
-    never counted as fact.
-
-    Stored in its own metadata field so an admin can review what keeps
-    appearing and promote genuine brands into PRODUCT_LIST. Keeping these
-    out of the authoritative `products` tag is what stops the ranking from
-    being polluted by ordinary capitalized nouns.
-    """
-    known = set()
-    for product in PRODUCT_LIST:
-        known.update(product.split())
-        known.add(product)
-
-    def _is_noise(w: str) -> bool:
-        return (w in PRODUCT_STOPWORDS or w in MONTH_MAP
-                or w in DISEASE_PEST_WORDS or w in GENERIC_CAPITALIZED_STOPWORDS)
-
-    out, seen = [], set()
-    for cand in re.findall(r'\b([A-Z][a-zA-Z]{2,}(?:\s+[A-Z][a-zA-Z]{2,}){0,2})\b', text):
-        words = cand.split()
-        # Trim noise words off the edges rather than discarding the whole
-        # phrase: the greedy capture pairs a sentence-initial word with the
-        # real name, so "Some NewBrandX" was being thrown away entirely
-        # because of "Some".
-        while words and _is_noise(words[0].lower()):
-            words.pop(0)
-        while words and _is_noise(words[-1].lower()):
-            words.pop()
-        if not words:
-            continue
-        lowered = [w.lower() for w in words]
-        # A noise word still sitting in the MIDDLE means this isn't a name.
-        if any(_is_noise(w) for w in lowered):
-            continue
-        if all(w in known for w in lowered):
-            continue  # already covered by the catalog pass
-        trimmed = " ".join(words)
-        if trimmed.lower() in ("syngenta",):
-            continue
-        if len(words) > 1 and trimmed.isupper():
-            continue
-        key = trimmed.lower()
-        if key not in seen:
-            seen.add(key)
-            out.append(trimmed)
-    return out
 
 
 def build_comparison_periods(all_months, all_years, all_weeks, index):
@@ -1899,10 +1780,8 @@ def _make_metadata_payload(inferred_year, row_month, week_label, category, bulle
         ),
         "value":    bullet[:MAX_VALUE_CHARS],
         "crop":     ",".join(extract_crops(bullet)),
-        # Authoritative catalog matches — the only field ranking counts.
+        # Catalog matches only — the price list is the source of truth.
         "products": ",".join(extract_product_mentions(bullet)),
-        # Uncatalogued capitalized phrases, kept for admin review only.
-        "products_candidate": ",".join(extract_product_candidates(bullet)),
         "sheet":    sheet_name,
         "src_row":  int(src_row),
         "ingest_run": ingest_run,
@@ -2345,6 +2224,47 @@ CORRECTION_ACK_REPLY = (
 )
 
 
+# "What can I ask you?" is the most natural opening question a new user
+# has, and it contains no domain vocabulary — so the topic guardrail
+# refused it with "I cannot generate this response", which reads as the
+# tool being broken rather than as a scope boundary.
+CAPABILITY_PHRASES = [
+    "what can you do", "what can you generate", "what can you tell me",
+    "what can i ask", "what should i ask", "what questions can",
+    "what kind of questions", "what type of questions", "how do i use",
+    "how does this work", "what are you", "who are you", "help me get started",
+    "what are your capabilities", "capabilities", "what do you do",
+    "give me some examples", "example questions", "sample questions",
+    "what can this do", "what is this",
+]
+
+CAPABILITY_REPLY = (
+    "I answer questions about your ingested grower-feedback data. Here's what I can do:\n\n"
+    "**Sentiment & themes**\n"
+    "- Overall sentiment, positive feedback, or complaints — for everything, or scoped to one product or crop\n"
+    "- What growers are talking about most (themes, not just good/bad)\n"
+    "- Suggestions and improvement requests growers have raised\n\n"
+    "**Rankings & trends** *(counted exactly, never estimated)*\n"
+    "- Which crop or product has the most complaints or positive feedback\n"
+    "- Monthly trends with month-over-month change\n\n"
+    "**Comparisons**\n"
+    "- Two time periods — \"compare January 2026 and February 2026\"\n"
+    "- Two products or crops — \"compare Tilt and Isabion\"\n\n"
+    "**Time filters**\n"
+    "- A specific month or year, \"the last 3 months\", \"last quarter\", \"since March\"\n\n"
+    "**Exports** — every answer can be downloaded as CSV, Excel or PowerPoint.\n\n"
+    "Try: *\"Which crop generated the highest number of complaints?\"* or "
+    "*\"What are growers saying about Isabion?\"*\n\n"
+    "One limit worth knowing: I only use your ingested feedback. I won't answer "
+    "from general knowledge, and if the data doesn't cover something I'll say so."
+)
+
+
+def detect_capability_question(query_lower: str) -> bool:
+    """Detects a user asking what the tool can do, rather than asking it for data."""
+    return any(p in query_lower for p in CAPABILITY_PHRASES)
+
+
 def detect_correction_or_meta_feedback(query_lower: str) -> bool:
     """Detects a message that's giving feedback/correcting the chatbot's own behavior or knowledge, rather than asking a data question — see CORRECTION_PHRASES for the coverage caveat."""
     return any(p in query_lower for p in CORRECTION_PHRASES)
@@ -2361,6 +2281,12 @@ def process_chat_query(user_query: str, pinecone_api_key: str, groq_api_key: str
     # neither engages with what the user actually said.
     if detect_correction_or_meta_feedback(query_lower):
         return {"kind": "meta_feedback", "reply": CORRECTION_ACK_REPLY}
+
+    # Same reasoning: a question ABOUT the tool carries no domain vocabulary,
+    # so the guardrail below would refuse it. Answering "what can I ask you?"
+    # with "I cannot generate this response" reads as a broken product.
+    if detect_capability_question(query_lower):
+        return {"kind": "capability", "reply": CAPABILITY_REPLY}
 
     # A bare continuation phrase ("what about last month?") carries no
     # domain keyword of its own — it only makes sense in light of a prior
@@ -2504,9 +2430,13 @@ def process_chat_query(user_query: str, pinecone_api_key: str, groq_api_key: str
 
     all_products = detect_all_products(query_lower)
     all_crops = detect_all_crops(query_lower)
+    # Catalog matching only. A dynamic "probe the index and guess" fallback
+    # used to run here; with PRODUCT_LIST derived from the official price
+    # list it could only ever confirm a name the direct match above already
+    # found, while costing an embedding call plus a vector query on every
+    # question with no recognized product — and it was the source of every
+    # false-product bug (other, pricing, delayed, farmers, provided, past).
     active_product = all_products[0] if all_products else None
-    if not active_product:
-        active_product = detect_product_dynamic(query_lower, index, pc, original_query=user_query)
     active_crop = all_crops[0] if all_crops else None
     if active_product and active_crop and active_product.lower() == active_crop.lower():
         active_product = None

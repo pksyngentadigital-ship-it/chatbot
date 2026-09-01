@@ -48,13 +48,6 @@
     </div>
 
     <div class="admin-card">
-      <h2>Possible New Products</h2>
-      <p class="admin-status">Capitalized phrases in the feedback that look like brand names but are not in the product catalog. They are deliberately excluded from every ranking — counting them put diseases and agronomic terms in the top 10. Review these and add any genuine brands to the catalog, then re-ingest with purge.</p>
-      <button type="button" id="load-candidates">Load candidates</button>
-      <div id="candidate-report"></div>
-    </div>
-
-    <div class="admin-card">
       <h2>Flagged Feedback</h2>
       <p class="admin-status">Messages where a user corrected the chatbot's own knowledge or behavior (e.g. "X is not a product") — these are logged here instead of the chatbot acting on them directly, since it can't safely self-modify shared behavior from one chat message.</p>
       {% if feedback_log %}

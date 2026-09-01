@@ -256,32 +256,6 @@ def admin_logout(request: Request):
     return RedirectResponse(url="/admin", status_code=303)
 
 
-@app.get("/admin/product-candidates")
-def admin_product_candidates(request: Request):
-    """Capitalized phrases that look like brand names but are not in
-    PRODUCT_LIST. These are deliberately excluded from the product ranking
-    — counting them put diseases and agronomic terms in the top 10 — so
-    this is the review surface for promoting genuine ones into the catalog."""
-    if not request.session.get("authenticated"):
-        raise HTTPException(status_code=401, detail="Not authenticated")
-    if not PINECONE_API_KEY:
-        raise HTTPException(status_code=400, detail="Pinecone API key is not configured")
-    try:
-        pc = vog_core.Pinecone(api_key=PINECONE_API_KEY)
-        index = pc.Index(vog_core.PINECONE_INDEX_NAME)
-        matches, complete = vog_core.fetch_matches_for_aggregation(index, None)
-        ranked = vog_core.rank_by_field(matches, "products_candidate", top_n=40)
-        return {
-            "candidates": [{"name": n, "mentions": c} for n, c in ranked],
-            "complete": complete,
-            "note": "Not counted in any ranking. Add genuine brands to PRODUCT_LIST, then re-ingest with purge.",
-        }
-    except Exception as e:
-        ref = uuid.uuid4().hex[:8]
-        log.exception("Candidate listing failed [ref=%s]", ref)
-        raise HTTPException(status_code=500, detail=f"Could not list candidates (ref {ref})")
-
-
 @app.post("/admin/feedback-log/clear")
 def admin_clear_feedback_log(request: Request):
     if not request.session.get("authenticated"):
@@ -382,7 +356,7 @@ def chat(request: Request, q: str = Query(..., min_length=1, max_length=MAX_QUER
         if kind == "meta_feedback":
             _log_feedback(q)
 
-        if kind in ("blocked", "no_key", "no_data", "meta_feedback"):
+        if kind in ("blocked", "no_key", "no_data", "meta_feedback", "capability"):
             if "context" in state:
                 session_data["prior_context"] = state["context"]
             _append_history(session_data, {

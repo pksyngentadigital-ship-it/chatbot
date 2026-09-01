@@ -102,20 +102,17 @@ def test_catalog_products_are_still_tagged():
     assert set(vc.extract_product_mentions("Isabion Gold and Virtako applied")) == {"Isabion Gold", "Virtako"}
 
 
-def test_uncatalogued_brands_are_captured_as_candidates_not_products():
+def test_uncatalogued_names_are_simply_not_products():
+    # No guessing step remains: a name that is not in the price list is not
+    # a product, full stop. It enters the system by being added to the
+    # catalog and re-ingested.
     assert vc.extract_product_mentions("Growers liked Zynora very much") == []
-    assert "Zynora" in vc.extract_product_candidates("Growers liked Zynora very much")
+    assert vc.extract_product_mentions("Some NewBrandX product was tried") == []
 
 
-def test_candidate_extraction_trims_leading_noise_words():
-    # The greedy capture pairs a sentence-initial word with the real name;
-    # rejecting the whole phrase lost the brand entirely.
-    assert vc.extract_product_candidates("Some NewBrandX product was tried") == ["NewBrandX"]
-
-
-def test_candidates_exclude_diseases_and_catalog_duplicates():
-    assert vc.extract_product_candidates("Early Blight in Tomato crop") == []
-    assert vc.extract_product_candidates("Naya Potash gave good results") == []
+def test_no_heuristic_guessing_machinery_remains():
+    assert not hasattr(vc, "extract_product_candidates")
+    assert not hasattr(vc, "detect_product_dynamic")
 
 
 # ── Product master (Syngenta Pakistan price list, 8-Jun-2026) ──

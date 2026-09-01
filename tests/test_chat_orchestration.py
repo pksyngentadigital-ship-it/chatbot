@@ -559,3 +559,33 @@ def test_topics_keyword_takes_priority_over_generic_sentiment_default(fake_pinec
     ])
     state = vc.process_chat_query("what are the most talked about subjects?", "fake-key")
     assert state.get("query_intent") == "topics"
+
+
+# ── Questions ABOUT the tool, not about the data ──
+
+def test_capability_question_is_answered_not_refused():
+    # "What can I ask you?" is the most natural first question a new user
+    # has, and it carries no domain vocabulary — the guardrail used to
+    # refuse it with "I cannot generate this response".
+    for q in [
+        "What can you generate for me?",
+        "What can I ask you?",
+        "what can you do",
+        "give me some examples",
+        "how does this work?",
+    ]:
+        state = vc.process_chat_query(q, None)
+        assert state["kind"] == "capability", q
+        assert "I cannot generate this response" not in state["reply"]
+
+
+def test_capability_reply_describes_real_features():
+    state = vc.process_chat_query("what can you do", None)
+    reply = state["reply"].lower()
+    for feature in ["sentiment", "complaint", "compare", "trend", "powerpoint"]:
+        assert feature in reply, feature
+
+
+def test_a_real_data_question_is_not_mistaken_for_a_capability_question():
+    assert vc.detect_capability_question("what are the complaints about isabion") is False
+    assert vc.detect_capability_question("which crop has the most complaints") is False
