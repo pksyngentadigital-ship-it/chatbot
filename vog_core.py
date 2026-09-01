@@ -470,15 +470,44 @@ def extract_month_from_col(col: str) -> str:
     return MONTH_MAP.get(match.group(1).lower(), match.group(1).capitalize())
 
 
+# A single record written at the end of ingestion holding the dataset's
+# real extents. Reading these from a sampled query was unsound: a zero
+# vector carries no similarity signal, so Pinecone returns arbitrary
+# records, and taking max(year) over 10 of them could resolve "March" to
+# the wrong year entirely — non-deterministically, while the header stated
+# that wrong year with full confidence.
+INDEX_STATS_ID = "vog_index_stats"
+
+
+def _read_index_stats(index) -> dict | None:
+    try:
+        res = index.fetch(ids=[INDEX_STATS_ID])
+        vectors = getattr(res, "vectors", None) or (res.get("vectors") if isinstance(res, dict) else None) or {}
+        entry = vectors.get(INDEX_STATS_ID)
+        if not entry:
+            return None
+        md = entry.get("metadata") if isinstance(entry, dict) else getattr(entry, "metadata", None)
+        return md or None
+    except Exception:
+        return None
+
+
 def get_latest_year_from_index(index) -> str:
+    stats = _read_index_stats(index)
+    if stats and str(stats.get("max_year", "")).isdigit():
+        return str(stats["max_year"])
+
+    # Fallback for an index ingested before stats were written. Sample far
+    # more widely than the old top_k=10, which was small enough to miss the
+    # most recent year outright.
     try:
         dummy_vector = [0.0] * EMBEDDING_DIMENSION
-        results = index.query(vector=dummy_vector, top_k=10, include_metadata=True)
-        years = []
-        for match in results.get("matches", []):
-            year = match.get("metadata", {}).get("year")
-            if year and year.isdigit():
-                years.append(int(year))
+        results = index.query(vector=dummy_vector, top_k=1000, include_metadata=True)
+        years = [
+            int(y) for m in results.get("matches", [])
+            for y in [m.get("metadata", {}).get("year")]
+            if y and str(y).isdigit()
+        ]
         if years:
             return str(max(years))
     except Exception:
@@ -518,9 +547,15 @@ MONTH_ORDER_INV = {v: k for k, v in MONTH_ORDER.items()}
 
 def get_latest_month_year_from_index(index) -> tuple[str, str] | None:
     """ Find the most recent (month, year) pair actually present in the ingested data — the anchor every relative-date phrase ("last month", "last quarter") resolves against. Anchored to the data, not the real calendar date, for the same reason get_latest_year_from_index is: the dataset may lag behind today, so a real-calendar "last month" could return empty even when recent data exists. """
+    stats = _read_index_stats(index)
+    if stats:
+        month, year = stats.get("max_month"), stats.get("max_year")
+        if month in MONTH_ORDER and str(year).isdigit():
+            return month, str(year)
+
     try:
         dummy_vector = [0.0] * EMBEDDING_DIMENSION
-        results = index.query(vector=dummy_vector, top_k=200, include_metadata=True)
+        results = index.query(vector=dummy_vector, top_k=1000, include_metadata=True)
         pairs = []
         for m in results.get("matches", []):
             md = m.get("metadata", {})
@@ -645,6 +680,15 @@ def query_pinecone_for_timeframe(index, query_vector, month, year, week, query_i
     if year:
         filter_conditions["year"]  = {"$eq": year}
 
+    # Week as a DATABASE filter, not a Python post-filter. Applying it after
+    # the top_k cut meant the similarity ranking selected 100 records for the
+    # whole month first, and the week filter then discarded most of what
+    # came back — returning "no data" for weeks that genuinely had data,
+    # silently and in proportion to how large the month was.
+    week_num = _week_number(week) if week else None
+    if week_num is not None:
+        filter_conditions["week_num"] = {"$eq": week_num}
+
     # ── CATEGORY FILTER (e.g. "Suggestions") TAKES PRIORITY OVER SENTIMENT ──
     if category_filter:
         filter_conditions["category"] = {"$eq": category_filter}
@@ -663,6 +707,17 @@ def query_pinecone_for_timeframe(index, query_vector, month, year, week, query_i
         filter=metadata_filter
     )
     matches = results.get("matches", [])
+
+    # Records written before week_num existed have no such field and are
+    # excluded by the DB filter above, so fall back to the legacy text
+    # match when the filtered query comes back empty.
+    if week_num is not None and not matches:
+        legacy_filter = {k: v for k, v in filter_conditions.items() if k != "week_num"}
+        results = index.query(
+            vector=query_vector, top_k=top_k, include_metadata=True,
+            filter=legacy_filter or None,
+        )
+        matches = results.get("matches", [])
 
     ORDINAL_MAP = {
         "first": "1st", "second": "2nd",
@@ -827,9 +882,16 @@ def detect_product_dynamic(query_lower: str, index, pc, original_query: str = ""
     return None
 
 
+def _mentions(text: str, term: str) -> bool:
+    """Word-boundary containment. Bare substring matching made 'rice' match
+    'price' and 'gram' match 'program' — and it was inconsistent with
+    extract_crops, which has always used \\b at ingestion time."""
+    return bool(re.search(r'\b' + re.escape(term.lower()) + r'\b', text.lower()))
+
+
 def filter_bullets_by_product(bullets: list[str], product: str) -> list[str]:
     """Keep only bullets that actually reference the requested product."""
-    return [b for b in bullets if product.lower() in b.lower()]
+    return [b for b in bullets if _mentions(b, product)]
 
 
 def detect_crop(query_lower: str) -> str | None:
@@ -841,8 +903,12 @@ def detect_crop(query_lower: str) -> str | None:
 
 
 def filter_bullets_by_crop(bullets: list[str], crop: str) -> list[str]:
-    """Keep only bullets that actually reference the requested crop."""
-    return [b for b in bullets if crop.lower() in b.lower()]
+    """Keep only bullets that actually reference the requested crop, allowing
+    for synonyms (a 'rice' query should also match bullets saying 'paddy')."""
+    aliases = {crop.lower()} | {
+        k for k, v in CROP_CANONICAL.items() if v.lower() == canonical_crop(crop).lower()
+    } | {canonical_crop(crop).lower()}
+    return [b for b in bullets if any(_mentions(b, a) for a in aliases)]
 
 
 def canonical_crop(crop: str) -> str:
@@ -1023,14 +1089,62 @@ def detect_aggregation_request(query_lower: str) -> str | None:
     return 'crop' if crop_subject else 'product'
 
 
-def fetch_matches_for_aggregation(index, filter_conditions, top_k=10000):
-    """ Broad, non-semantic fetch (dummy vector) used purely for exact counting/ranking over metadata tags. top_k is set high (Pinecone's practical ceiling) because a zero vector carries no similarity signal — Pinecone returns matches in whatever internal order it likes, so a small top_k risks silently missing the tagged subset (e.g. only a minority of complaint records mention a specific crop by name) rather than giving a true representative sample. """
+# Pinecone's per-query top_k is materially lower when metadata is included
+# than the 10000 the previous code requested, and there was no check for
+# whether the result had been capped — so a partial, arbitrarily-selected
+# subset was being reported as an exhaustive census ("Based on N matched
+# records..."). Page instead, and tell the caller when the data is
+# nonetheless incomplete so the reply can say "sample" rather than "total".
+AGGREGATION_PAGE_SIZE = 1000
+AGGREGATION_MAX_RECORDS = 10000
+
+
+_WORD_NUMBERS = {
+    "three": 3, "four": 4, "five": 5, "six": 6, "seven": 7,
+    "eight": 8, "nine": 9, "ten": 10, "twenty": 20,
+}
+
+
+def detect_requested_top_n(query_lower: str) -> int | None:
+    """Parse the N in "top 5" / "top five". detect_aggregation_request
+    already recognises these phrasings, but the resolver hard-coded 10, so
+    asking for the top 5 returned ten rows."""
+    m = re.search(r'\btop\s+(\d{1,2})\b', query_lower)
+    if m:
+        n = int(m.group(1))
+        return n if 1 <= n <= 50 else None
+    m = re.search(r'\btop\s+(three|four|five|six|seven|eight|nine|ten|twenty)\b', query_lower)
+    if m:
+        return _WORD_NUMBERS[m.group(1)]
+    return None
+
+
+def fetch_matches_for_aggregation(index, filter_conditions, top_k=None):
+    """Broad, non-semantic fetch used purely for exact counting over metadata
+    tags. Returns (matches, complete) — `complete` is False when the fetch
+    hit its ceiling, meaning any count derived from it is a lower bound."""
+    matches, complete = _fetch_aggregation_page(index, filter_conditions, top_k)
+    return matches, complete
+
+
+def _fetch_aggregation_page(index, filter_conditions, top_k=None):
+    page = top_k or AGGREGATION_PAGE_SIZE
     dummy_vector = [0.0] * EMBEDDING_DIMENSION
-    results = index.query(
-        vector=dummy_vector, top_k=top_k, include_metadata=True,
-        filter=filter_conditions if filter_conditions else None
-    )
-    return results.get("matches", [])
+    try:
+        results = index.query(
+            vector=dummy_vector, top_k=page, include_metadata=True,
+            filter=filter_conditions if filter_conditions else None
+        )
+    except Exception:
+        return [], False
+
+    matches = [
+        m for m in results.get("matches", [])
+        if not (m.get("metadata") or {}).get("is_stats_record")
+    ]
+    # If the page came back full, the result set was truncated.
+    complete = len(results.get("matches", [])) < page
+    return matches, complete
 
 
 def rank_by_field(matches, field: str, top_n: int = 10):
@@ -1085,6 +1199,28 @@ def compute_monthly_trend(matches):
 
     ordered_keys = sorted(counts.keys(), key=lambda k: (int(k[0]), MONTH_ORDER[k[1]]))
     return [(f"{month} {year}", counts[(year, month)]) for year, month in ordered_keys]
+
+
+def densify_monthly_counts(monthly_counts):
+    """Insert zero-count entries for months with no records.
+
+    compute_monthly_trend only emits months that have data, so walking the
+    result by index treats non-adjacent months as consecutive — a series of
+    [Nov 2025, Feb 2026] produced a "+300% month-over-month" label across a
+    three-month gap.
+    """
+    if not monthly_counts:
+        return []
+    parsed = []
+    for label, count in monthly_counts:
+        month, year = label.rsplit(" ", 1)
+        parsed.append((_month_idx(month, year), count))
+    out = []
+    for idx in range(parsed[0][0], parsed[-1][0] + 1):
+        month, year = _idx_to_month_year(idx)
+        match = next((c for i, c in parsed if i == idx), 0)
+        out.append((f"{month} {year}", match))
+    return out
 
 
 def compute_growth_series(monthly_counts):
@@ -1877,6 +2013,31 @@ def run_ingestion(file_bytes: bytes, pinecone_api_key: str, purge_first: bool = 
             index.upsert(vectors=vectors[j: j + 50])
         written += len(vectors)
 
+    # Record the dataset's real extents so relative-date resolution reads a
+    # fact instead of sampling arbitrary records and taking a max.
+    dated = [
+        (int(m["metadata"]["year"]), m["metadata"]["month"])
+        for m in payload_batch
+        if str(m["metadata"].get("year", "")).isdigit() and m["metadata"].get("month") in MONTH_ORDER
+    ]
+    if dated:
+        max_year, max_month = max(dated, key=lambda p: (p[0], MONTH_ORDER[p[1]]))
+        min_year, min_month = min(dated, key=lambda p: (p[0], MONTH_ORDER[p[1]]))
+        try:
+            index.upsert(vectors=[{
+                "id": INDEX_STATS_ID,
+                "values": [0.0] * EMBEDDING_DIMENSION,
+                "metadata": {
+                    "is_stats_record": True,
+                    "max_year": str(max_year), "max_month": max_month,
+                    "min_year": str(min_year), "min_month": min_month,
+                    "total_records": written,
+                    "ingest_run": ingest_run,
+                },
+            }])
+        except Exception:
+            pass  # stats are an optimization; the sampled fallback still works
+
     return {
         "total_records": written,
         "summary": discovered_data_summary,
@@ -2007,6 +2168,7 @@ def process_chat_query(user_query: str, pinecone_api_key: str, groq_api_key: str
     wants_products_only = bool(re.search(r'\bproducts?\b', query_lower))
     wants_trend = detect_trend_request(query_lower)
     aggregation_dimension = detect_aggregation_request(query_lower)
+    requested_top_n = detect_requested_top_n(query_lower)
 
     topic_keywords = [
         "talking about", "talking most about", "talking the most about",
@@ -2175,26 +2337,40 @@ def process_chat_query(user_query: str, pinecone_api_key: str, groq_api_key: str
         except Exception:
             retrieval_vector = query_vector
 
-    # ── Deterministic ranking path ──
-    if aggregation_dimension:
-        return _resolve_ranking(aggregation_dimension, query_intent, category_filter, detected_month, detected_year, index, output_format=output_format, groq_api_key=groq_api_key)
-
-    # ── Monthly trend path ──
-    if wants_trend:
-        return _resolve_trend(query_intent, category_filter, active_crop, active_product, index, output_format=output_format, groq_api_key=groq_api_key)
-
     # ── Comparison auto-detection ──
     periods = build_comparison_periods(all_months, all_years, all_weeks, index)
 
     # ── Relative time-window detection ("last 30 days", "last quarter",
     # "last 3 months") — only when the query didn't already pin an explicit
     # month/year (those always take priority) and isn't already a
-    # multi-value comparison. ──
+    # multi-value comparison. Resolved BEFORE the ranking/trend branches so
+    # those paths are time-scoped too; they used to return first, which is
+    # why "the trend for the past three years" charted all of history. ──
     relative_window = None
     if not periods and not all_months and not all_years:
         window_desc = detect_relative_window(query_lower)
         if window_desc:
             relative_window = resolve_relative_window(window_desc, index)
+    window_months = relative_window[0] if relative_window else None
+    window_label = relative_window[1] if relative_window else None
+
+    # ── Deterministic ranking path ──
+    if aggregation_dimension:
+        return _resolve_ranking(
+            aggregation_dimension, query_intent, category_filter, detected_month, detected_year,
+            index, output_format=output_format, groq_api_key=groq_api_key,
+            window_months=window_months, window_label=window_label,
+            top_n=requested_top_n or 10,
+        )
+
+    # ── Monthly trend path ──
+    if wants_trend:
+        return _resolve_trend(
+            query_intent, category_filter, active_crop, active_product, index,
+            output_format=output_format, groq_api_key=groq_api_key,
+            window_months=window_months, window_label=window_label,
+            detected_month=detected_month, detected_year=detected_year,
+        )
 
     if periods:
         period_results = []
@@ -2331,7 +2507,27 @@ def process_chat_query(user_query: str, pinecone_api_key: str, groq_api_key: str
             )
         return {"kind": "no_data", "reply": reply, "context": resolved_context}
 
-    MAX_BULLETS = 12
+    # Breadth-seeking intents need a real sample to find genuine themes; a
+    # narrow single-product lookup does not. One flat cap for both meant
+    # "what is everyone talking about" was answered from the same 12
+    # records as "what do growers think about Isabion".
+    MAX_BULLETS = 40 if (query_intent == "topics" or (query_intent == "sentiment" and not subject_label)) else 12
+
+    # True counts BEFORE truncation. These drive the chart, the KPIs and the
+    # exported files — previously those were computed from the truncated
+    # lists, so a month with 60 negative records exported "Negative: 12".
+    true_counts = {
+        "positive": len(positive_bullets) if positive_bullets is not None else 0,
+        "negative": len(negative_bullets) if negative_bullets is not None else 0,
+        "neutral": len(neutral_bullets) if neutral_bullets is not None else 0,
+    }
+    if periods and period_results:
+        true_counts = {
+            "positive": sum(len(pp) for _, pp, _, _ in period_results),
+            "negative": sum(len(pn) for _, _, pn, _ in period_results),
+            "neutral": sum(len(pu) for _, _, _, pu in period_results),
+        }
+    true_total = sum(true_counts.values())
 
     if periods:
         context_parts = []
@@ -2389,10 +2585,23 @@ def process_chat_query(user_query: str, pinecone_api_key: str, groq_api_key: str
         active_crop=active_crop, output_format=output_format, wants_products_only=wants_products_only,
         avoid_repeat_text=avoid_repeat_text
     )
+    # Be explicit with the model about sampling. Saying "N total" when N was
+    # a truncated slice invited it to describe a 12-record sample as the
+    # whole picture.
+    if true_total > actual_point_count:
+        volume_note = (
+            f"Data Context — showing {actual_point_count} of {true_total} matching data points "
+            f"(a sample, NOT the complete set). Base every statement only on the points below, "
+            f"and do not state or imply totals, counts or proportions for the full dataset"
+        )
+    else:
+        volume_note = (
+            f"Data Context ({actual_point_count} distinct data point"
+            f"{'s' if actual_point_count != 1 else ''} total — do not exceed this number)"
+        )
     user_prompt = (
         f"Timeframe: {timeframe_label}\n\n"
-        f"Data Context ({actual_point_count} distinct data point{'s' if actual_point_count != 1 else ''} total — "
-        f"do not exceed this number):\n{combined_context}\n\n"
+        f"{volume_note}:\n{combined_context}\n\n"
         f"User Query: {user_query}"
     )
     response_token_budget = 900 if output_format in ("exec_summary", "table", "ppt") or query_intent == "topics" else 500
@@ -2414,6 +2623,8 @@ def process_chat_query(user_query: str, pinecone_api_key: str, groq_api_key: str
         "negative_bullets": negative_bullets,
         "neutral_bullets": neutral_bullets,
         "actual_point_count": actual_point_count,
+        "true_counts": true_counts,
+        "true_total": true_total,
         "context": resolved_context,
     }
 
@@ -2577,21 +2788,34 @@ def finalize_normal_response(state: dict, full_response: str) -> dict:
         for b in neutral_bullets:
             export_rows.append({"Period": timeframe_label, "Sentiment": "Other", "Feedback": b})
 
+    # Charts and KPIs report the TRUE match counts, not the truncated slice
+    # that was sent to the model. Deriving them from the truncated lists
+    # meant a month with 60 negative records rendered as "Negative: 12" —
+    # in the PowerPoint and Excel files a business user downloads.
+    true_counts = state.get("true_counts") or {
+        "positive": len(positive_bullets or []),
+        "negative": len(negative_bullets or []),
+        "neutral": len(neutral_bullets or []),
+    }
+    true_total = state.get("true_total", sum(true_counts.values()))
+
     if periods:
         chart_labels = [label for label, *_ in period_results]
         chart_values = [len(pp) + len(pn) + len(pu) for _, pp, pn, pu in period_results]
         chart_title = "Total Data Points by Period"
     else:
         chart_labels = ["Positive", "Negative", "Other"]
-        chart_values = [len(positive_bullets), len(negative_bullets), len(neutral_bullets)]
+        chart_values = [true_counts["positive"], true_counts["negative"], true_counts["neutral"]]
         chart_title = "Sentiment Breakdown"
 
     kpis = {
-        "Total data points": actual_point_count,
-        "Positive": sum(len(pp) for _, pp, _, _ in period_results) if periods else len(positive_bullets),
-        "Negative": sum(len(pn) for _, _, pn, _ in period_results) if periods else len(negative_bullets),
-        "Other": sum(len(pu) for _, _, _, pu in period_results) if periods else len(neutral_bullets),
+        "Total matching records": true_total,
+        "Positive": true_counts["positive"],
+        "Negative": true_counts["negative"],
+        "Other": true_counts["neutral"],
     }
+    if true_total > actual_point_count:
+        kpis["Shown to the model"] = f"{actual_point_count} (sample)"
     summary_points = split_into_points(full_response, max_points=6)
 
     pptx_bytes = build_pptx_report(
@@ -2630,12 +2854,20 @@ def finalize_normal_response(state: dict, full_response: str) -> dict:
     }
 
 
-def _resolve_ranking(aggregation_dimension, query_intent, category_filter, detected_month, detected_year, index, output_format=None, groq_api_key=None) -> dict:
+def _resolve_ranking(aggregation_dimension, query_intent, category_filter, detected_month, detected_year, index, output_format=None, groq_api_key=None, window_months=None, window_label=None, top_n=10) -> dict:
     agg_filter = {}
-    if detected_month:
-        agg_filter["month"] = {"$eq": detected_month}
-    if detected_year:
-        agg_filter["year"] = {"$eq": detected_year}
+    # Time scoping now reaches this path. Previously ranking returned before
+    # relative-window resolution ran and never received a month/year, so
+    # "which crop had the most complaints last quarter" silently ranked over
+    # all history and labelled itself "all available data".
+    if window_months:
+        agg_filter["month"] = {"$in": sorted({m for m, _ in window_months})}
+        agg_filter["year"] = {"$in": sorted({y for _, y in window_months})}
+    else:
+        if detected_month:
+            agg_filter["month"] = {"$eq": detected_month}
+        if detected_year:
+            agg_filter["year"] = {"$eq": detected_year}
     if query_intent == "positive":
         agg_filter["sentiment"] = {"$eq": "positive"}
     elif query_intent == "complaint":
@@ -2643,17 +2875,16 @@ def _resolve_ranking(aggregation_dimension, query_intent, category_filter, detec
     elif category_filter:
         agg_filter["category"] = {"$eq": category_filter}
 
-    agg_matches = fetch_matches_for_aggregation(index, agg_filter)
+    agg_matches, complete = fetch_matches_for_aggregation(index, agg_filter)
     field = "crop" if aggregation_dimension == "crop" else "products"
-    ranking = rank_by_field(agg_matches, field, top_n=10)
+    ranking = rank_by_field(agg_matches, field, top_n=top_n)
 
     badge = f"📊 {aggregation_dimension.title()} Ranking"
-    scope_bits = []
-    if detected_month:
-        scope_bits.append(detected_month)
-    if detected_year:
-        scope_bits.append(detected_year)
-    scope_label = " ".join(scope_bits) if scope_bits else "all available data"
+    if window_label:
+        scope_label = window_label
+    else:
+        scope_bits = [b for b in (detected_month, detected_year) if b]
+        scope_label = " ".join(scope_bits) if scope_bits else "all available data"
     header = f"📊 {aggregation_dimension.title()}-wise Ranking ({scope_label}):\n\n"
 
     if not ranking:
@@ -2667,9 +2898,17 @@ def _resolve_ranking(aggregation_dimension, query_intent, category_filter, detec
     for i, (name, count) in enumerate(ranking, start=1):
         table_lines.append(f"| {i} | {name} | {count} |")
     top_name, top_count = ranking[0]
+    tagged_total = sum(c for _, c in rank_by_field(agg_matches, field, top_n=10_000))
+    # Say "at least" when the fetch was capped, rather than presenting a
+    # truncated subset as a complete census.
+    basis = (
+        f"Based on {len(agg_matches)} matched records ({tagged_total} tagged mentions)"
+        if complete else
+        f"Based on a sample of {len(agg_matches)} matched records — more exist, so these counts are lower bounds"
+    )
     reply = (
         f"{header}"
-        f"Based on {len(agg_matches)} matched records, **{top_name}** ranks highest "
+        f"{basis}, **{top_name}** ranks highest "
         f"with {top_count} mention{'s' if top_count != 1 else ''}.\n\n"
         + "\n".join(table_lines)
     )
@@ -2721,8 +2960,19 @@ def _resolve_ranking(aggregation_dimension, query_intent, category_filter, detec
     }
 
 
-def _resolve_trend(query_intent, category_filter, active_crop, active_product, index, output_format=None, groq_api_key=None) -> dict:
+def _resolve_trend(query_intent, category_filter, active_crop, active_product, index, output_format=None, groq_api_key=None, window_months=None, window_label=None, detected_month=None, detected_year=None) -> dict:
     trend_filter = {}
+    # Trend previously received no time parameters at all, so "the monthly
+    # complaint trend for the past three years" charted all of history and
+    # showed no timeframe in its header.
+    if window_months:
+        trend_filter["month"] = {"$in": sorted({m for m, _ in window_months})}
+        trend_filter["year"] = {"$in": sorted({y for _, y in window_months})}
+    elif detected_year:
+        trend_filter["year"] = {"$eq": detected_year}
+        if detected_month:
+            trend_filter["month"] = {"$eq": detected_month}
+
     if query_intent == "positive":
         trend_filter["sentiment"] = {"$eq": "positive"}
     elif query_intent == "complaint":
@@ -2730,18 +2980,19 @@ def _resolve_trend(query_intent, category_filter, active_crop, active_product, i
     elif category_filter:
         trend_filter["category"] = {"$eq": category_filter}
 
-    trend_matches = fetch_matches_for_aggregation(index, trend_filter)
+    trend_matches, complete = fetch_matches_for_aggregation(index, trend_filter)
     if active_crop:
-        trend_matches = [m for m in trend_matches if active_crop.lower() in str(m.get("metadata", {}).get("value", "")).lower()]
+        trend_matches = [m for m in trend_matches if _mentions(str(m.get("metadata", {}).get("value", "")), active_crop)]
     if active_product:
-        trend_matches = [m for m in trend_matches if active_product.lower() in str(m.get("metadata", {}).get("value", "")).lower()]
+        trend_matches = [m for m in trend_matches if _mentions(str(m.get("metadata", {}).get("value", "")), active_product)]
 
-    monthly_counts = compute_monthly_trend(trend_matches)
+    monthly_counts = densify_monthly_counts(compute_monthly_trend(trend_matches))
     growth_series = compute_growth_series(monthly_counts)
 
     subject_label = build_subject_label(active_product, active_crop)
     subject_bit = f" for {subject_label}" if subject_label else ""
-    header = f"📈 Monthly Trend Analysis{subject_bit}:\n\n"
+    scope_bit = f" ({window_label})" if window_label else (f" ({detected_year})" if detected_year else "")
+    header = f"📈 Monthly Trend Analysis{subject_bit}{scope_bit}:\n\n"
 
     if not monthly_counts:
         reply = f"{header}No dated records were found{subject_bit} to build a monthly trend from."

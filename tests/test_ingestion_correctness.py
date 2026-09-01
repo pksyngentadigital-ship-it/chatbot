@@ -63,7 +63,10 @@ def ingest(monkeypatch):
 
 
 def _metas(index):
-    return list(index.records.values())
+    """Feedback records only — the index also holds a single stats record
+    describing the dataset's extents, which retrieval excludes by the same
+    is_stats_record flag."""
+    return [m for m in index.records.values() if not m.get("is_stats_record")]
 
 
 # ── Vector identity ──
@@ -81,7 +84,7 @@ def test_no_id_collision_between_row_and_bullet_indexes(ingest):
 
     result, index = ingest({"2026": df})
     assert result["total_records"] == 16
-    assert len(index.records) == 16, "reported count must equal what actually landed"
+    assert len(_metas(index)) == 16, "reported count must equal what actually landed"
 
 
 def test_reingesting_identical_content_is_idempotent(ingest):
@@ -255,7 +258,7 @@ def test_purge_first_clears_the_index_before_writing(ingest):
     df = pd.DataFrame({"Category": ["Positive Feedback"], "1st Week January": ["Good stuff here"]})
     result, index = ingest({"2026": df}, purge_first=True)
     assert index.delete_all_called is True
-    assert len(index.records) == result["total_records"]
+    assert len(_metas(index)) == result["total_records"]
 
 
 def test_oversized_cell_is_truncated_not_left_to_blow_the_metadata_limit(ingest):

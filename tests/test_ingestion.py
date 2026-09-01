@@ -36,7 +36,8 @@ def test_ingestion_layout_a_categories_as_rows_weeks_as_columns(fake_pinecone_fa
     result = vc.run_ingestion(workbook, "fake-key")
 
     assert result["total_records"] == 2
-    metas = [r["metadata"] for r in client.Index("chatbot").records]
+    metas = [r["metadata"] for r in client.Index("chatbot").records
+             if not r["metadata"].get("is_stats_record")]
     sentiments = {m["sentiment"] for m in metas}
     assert sentiments == {"positive", "negative"}
     assert all(m["year"] == "2026" for m in metas)
@@ -65,7 +66,8 @@ def test_ingestion_layout_b_month_week_rows_category_columns(fake_pinecone_facto
     result = vc.run_ingestion(workbook, "fake-key")
 
     assert result["total_records"] == 2
-    metas = [r["metadata"] for r in client.Index("chatbot").records]
+    metas = [r["metadata"] for r in client.Index("chatbot").records
+             if not r["metadata"].get("is_stats_record")]
     assert {m["month"] for m in metas} == {"January", "February"}
     assert all(m["year"] == "2025" for m in metas)
 
