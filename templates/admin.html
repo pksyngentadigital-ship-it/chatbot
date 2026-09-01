@@ -40,6 +40,23 @@
         <button type="submit" class="danger">Log out</button>
       </form>
     </div>
+
+    <div class="admin-card">
+      <h2>Flagged Feedback</h2>
+      <p class="admin-status">Messages where a user corrected the chatbot's own knowledge or behavior (e.g. "X is not a product") — these are logged here instead of the chatbot acting on them directly, since it can't safely self-modify shared behavior from one chat message.</p>
+      {% if feedback_log %}
+      <ul class="feedback-log-list">
+        {% for entry in feedback_log %}
+        <li><span class="feedback-log-time">{{ entry.timestamp }}</span> — {{ entry.message }}</li>
+        {% endfor %}
+      </ul>
+      <form method="post" action="/admin/feedback-log/clear" style="margin-top: 1rem;">
+        <button type="submit" class="danger">Clear log</button>
+      </form>
+      {% else %}
+      <p class="status-line">No flagged messages yet.</p>
+      {% endif %}
+    </div>
     <script>
       document.getElementById("ingest-form").addEventListener("submit", async (e) => {
         e.preventDefault();

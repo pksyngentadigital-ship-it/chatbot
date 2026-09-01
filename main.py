@@ -7,6 +7,7 @@ no JS build step. All business logic lives in vog_core.py — this file is
 purely the web-framework glue (routing, sessions, streaming, downloads).
 """
 
+import datetime
 import json
 import os
 import uuid
@@ -96,6 +97,25 @@ def _append_history(session_data: dict, entry: dict):
         session_data["history"] = session_data["history"][-_MAX_HISTORY_PER_SESSION:]
 
 
+# ── Flagged feedback log ──
+# When a user corrects the bot ("Kaho is not a product") the chatbot can't
+# safely self-modify shared behavior from one chat message — instead it
+# acknowledges the message and logs it here for a human to actually review,
+# so "I've logged this note" is true rather than a hollow platitude. Same
+# single-process, in-memory caveat as the other stores above.
+_FEEDBACK_LOG: list[dict] = []
+_MAX_FEEDBACK_LOG = 200
+
+
+def _log_feedback(message: str):
+    _FEEDBACK_LOG.append({
+        "message": message,
+        "timestamp": datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC"),
+    })
+    if len(_FEEDBACK_LOG) > _MAX_FEEDBACK_LOG:
+        _FEEDBACK_LOG.pop(0)
+
+
 # ==========================================
 # PAGES
 # ==========================================
@@ -116,10 +136,12 @@ def chat_page(request: Request):
 
 @app.get("/admin", response_class=HTMLResponse)
 def admin_page(request: Request):
+    authenticated = bool(request.session.get("authenticated"))
     return templates.TemplateResponse(request, "admin.html", {
-        "authenticated": bool(request.session.get("authenticated")),
+        "authenticated": authenticated,
         "error": None,
         "app_build": APP_BUILD,
+        "feedback_log": list(reversed(_FEEDBACK_LOG)) if authenticated else [],
     })
 
 
@@ -132,12 +154,21 @@ def admin_login(request: Request, password: str = Form(...)):
         "authenticated": False,
         "error": "Invalid credentials",
         "app_build": APP_BUILD,
+        "feedback_log": [],
     })
 
 
 @app.post("/admin/logout")
 def admin_logout(request: Request):
     request.session.clear()
+    return RedirectResponse(url="/admin", status_code=303)
+
+
+@app.post("/admin/feedback-log/clear")
+def admin_clear_feedback_log(request: Request):
+    if not request.session.get("authenticated"):
+        raise HTTPException(status_code=401, detail="Not authenticated")
+    _FEEDBACK_LOG.clear()
     return RedirectResponse(url="/admin", status_code=303)
 
 
@@ -180,7 +211,10 @@ def chat(request: Request, q: str):
 
         kind = state["kind"]
 
-        if kind in ("blocked", "no_key", "no_data"):
+        if kind == "meta_feedback":
+            _log_feedback(q)
+
+        if kind in ("blocked", "no_key", "no_data", "meta_feedback"):
             if "context" in state:
                 session_data["prior_context"] = state["context"]
             _append_history(session_data, {

@@ -440,3 +440,34 @@ def test_llm_fallback_not_invoked_when_intent_already_explicit(fake_pinecone_fac
     ])
     vc.process_chat_query("what are the complaints this month?", "fake-key", groq_api_key="fake-groq-key")
     assert calls == []
+
+
+# ── Correction/meta-feedback short-circuit ──
+
+def test_correction_message_short_circuits_before_any_retrieval(fake_pinecone_factory, fake_groq_factory):
+    # The exact live-reported bug: a correction message with no domain
+    # keyword or clear intent used to fall through to the Phase 7 LLM
+    # fallback, which could non-deterministically guess "complaint" and
+    # dump an unscoped wall of unrelated complaints. It must now be caught
+    # before reaching Pinecone or Groq at all.
+    calls = []
+
+    def _tracking(**kwargs):
+        calls.append(1)
+        return "{}"
+
+    fake_groq_factory(_tracking)
+    fake_pinecone_factory([
+        make_record("January", "2026", "negative", "Complaint/Negative Feedback", "Unrelated complaint about pricing."),
+    ])
+    state = vc.process_chat_query("Kaho is not a product of syngenta", "fake-key", groq_api_key="fake-groq-key")
+    assert state["kind"] == "meta_feedback"
+    assert state["reply"] == vc.CORRECTION_ACK_REPLY
+    assert calls == []
+
+
+def test_correction_message_works_without_any_api_keys():
+    # No Pinecone/Groq key needed at all — the short-circuit happens before
+    # either is touched.
+    state = vc.process_chat_query("that's wrong, please fix this", None)
+    assert state["kind"] == "meta_feedback"

@@ -194,3 +194,22 @@ def test_query_in_scope_true_for_domain_query():
 
 def test_query_in_scope_false_for_off_topic_query():
     assert vc.is_query_in_scope("write me a poem about the ocean") is False
+
+
+# ── detect_correction_or_meta_feedback ──
+
+def test_correction_detected_product_denial():
+    assert vc.detect_correction_or_meta_feedback("kaho is not a product of syngenta") is True
+
+
+def test_correction_detected_various_phrasings():
+    assert vc.detect_correction_or_meta_feedback("that's wrong, please fix this") is True
+    assert vc.detect_correction_or_meta_feedback("you're mistaken about that") is True
+    assert vc.detect_correction_or_meta_feedback("stop treating pricing as a product") is True
+    assert vc.detect_correction_or_meta_feedback("wheat is not a real crop") is True
+
+
+def test_correction_false_on_normal_data_questions():
+    assert vc.detect_correction_or_meta_feedback("what do growers think about isabion?") is False
+    assert vc.detect_correction_or_meta_feedback("which crop generated the highest number of complaints?") is False
+    assert vc.detect_correction_or_meta_feedback("show me the top 10 complaints this month") is False

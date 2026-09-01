@@ -1565,9 +1565,53 @@ def detect_wants_more(query_lower: str) -> bool:
     return any(p in query_lower for p in MORE_INSIGHTS_PHRASES)
 
 
+# Phrases that signal the user is correcting or giving feedback ABOUT the
+# chatbot itself ("Kaho is not a product", "you're wrong about that") —
+# rather than asking a question about the grower-feedback data. Deliberately
+# a deterministic phrase list, not an LLM call: this class of message is
+# rare enough that adding LLM latency/cost to every single message just to
+# catch it isn't worth it, mirroring the cheap-keyword-list-first approach
+# used for intent detection. Real natural language can phrase a correction
+# in effectively unlimited ways, so — like the relative-date parser — this
+# is a real, documented coverage limit, not a claim of completeness.
+CORRECTION_PHRASES = [
+    "is not a product", "isn't a product", "not a real product",
+    "is not a real product", "is not a crop", "isn't a crop",
+    "not a real crop", "that's wrong", "that is wrong", "that's incorrect",
+    "that is incorrect", "that's not correct", "that is not correct",
+    "you're wrong", "you are wrong", "you're mistaken", "you are mistaken",
+    "you made a mistake", "you made an error", "this is incorrect",
+    "this is wrong", "please fix this", "please correct this",
+    "stop treating", "stop showing", "stop labeling", "stop calling",
+    "should not be treated as", "shouldn't be treated as",
+    "you got that wrong", "you got this wrong",
+]
+
+CORRECTION_ACK_REPLY = (
+    "Thanks for flagging that — I don't have a way to update my product/crop "
+    "catalog or behavior directly from a chat message, since that's shared "
+    "across everyone using this tool and changing it here could affect "
+    "results for other users. I've logged this note for the team to review "
+    "and correct in the underlying configuration if confirmed."
+)
+
+
+def detect_correction_or_meta_feedback(query_lower: str) -> bool:
+    """Detects a message that's giving feedback/correcting the chatbot's own behavior or knowledge, rather than asking a data question — see CORRECTION_PHRASES for the coverage caveat."""
+    return any(p in query_lower for p in CORRECTION_PHRASES)
+
+
 def process_chat_query(user_query: str, pinecone_api_key: str, groq_api_key: str | None = None, prior_context: dict | None = None) -> dict:
     """ Runs everything up to (but not including) the Groq call. Returns a dict with "kind": - "blocked": off-topic query. "reply" is ready to show. - "no_key": Pinecone not configured. "reply" is ready to show. - "ranking" / "trend" / "no_data": fully resolved without needing an LLM — "reply" (markdown), optionally "chart" ({"type","title","labels","values"}) and "downloads" ({"csv","excel","pptx"} bytes). - "normal": needs an LLM call. Contains "system_prompt" / "user_prompt" ready to send to Groq, plus everything finalize_normal_response() will need afterwards. prior_context (optional): {"product","crop","intent"} resolved from the previous turn. Only used to fill in slots the CURRENT query left unspecified, and only when the query contains an explicit continuation phrase ("what about wheat?") — never silently overrides anything the current query itself states, so a fresh unrelated question is never scoped by accident. """
     query_lower = user_query.lower()
+
+    # Checked FIRST, before the topic guardrail: a correction like "you're
+    # wrong about that" carries no domain vocabulary and would otherwise hit
+    # the generic "I cannot generate this response" guardrail message,
+    # which is just as unhelpful as running it through the data pipeline —
+    # neither engages with what the user actually said.
+    if detect_correction_or_meta_feedback(query_lower):
+        return {"kind": "meta_feedback", "reply": CORRECTION_ACK_REPLY}
 
     # A bare continuation phrase ("what about last month?") carries no
     # domain keyword of its own — it only makes sense in light of a prior

@@ -447,6 +447,24 @@ button { font-family: inherit; }
 .error-text { color: #b34848; }
 .success-text { color: var(--accent); }
 .admin-status { color: var(--text-muted); font-size: 0.85rem; margin: 0 0 1.25rem; }
+.feedback-log-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  max-height: 260px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+}
+.feedback-log-list li {
+  font-size: 0.82rem;
+  line-height: 1.45;
+  color: var(--text);
+  border-bottom: 1px solid var(--border);
+  padding-bottom: 0.6rem;
+}
+.feedback-log-time { color: var(--text-muted); font-size: 0.75rem; }
 .admin-topbar {
   padding: 0.8rem 1.1rem;
   border-bottom: 1px solid var(--border);
