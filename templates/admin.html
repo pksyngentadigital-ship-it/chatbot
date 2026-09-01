@@ -33,9 +33,15 @@
       <form id="ingest-form">
         <label for="file">Upload Master Performance Log (.xlsx)</label>
         <input type="file" id="file" name="file" accept=".xlsx" required>
+        <label class="checkbox-row">
+          <input type="checkbox" id="purge-first" name="purge_first">
+          <span>Replace all existing data (purge first)</span>
+        </label>
+        <p class="admin-hint">Records already in the index keep the tags they were written with. After a change to how products, crops or categories are detected, a purge is required for the corrections to take effect — re-ingesting alone leaves the old records in place.</p>
         <button type="submit">Process &amp; Ingest</button>
       </form>
       <p id="ingest-status" class="status-line"></p>
+      <div id="ingest-report"></div>
       <form method="post" action="/admin/logout" style="margin-top: 1.5rem;">
         <button type="submit" class="danger">Log out</button>
       </form>
@@ -57,32 +63,7 @@
       <p class="status-line">No flagged messages yet.</p>
       {% endif %}
     </div>
-    <script>
-      document.getElementById("ingest-form").addEventListener("submit", async (e) => {
-        e.preventDefault();
-        const fileInput = document.getElementById("file");
-        const statusEl = document.getElementById("ingest-status");
-        if (!fileInput.files.length) return;
-        statusEl.textContent = "Processing — this can take a minute...";
-        statusEl.className = "status-line";
-        const formData = new FormData();
-        formData.append("file", fileInput.files[0]);
-        try {
-          const res = await fetch("/admin/ingest", { method: "POST", body: formData });
-          const data = await res.json();
-          if (res.ok && data.success) {
-            statusEl.textContent = `Done — ingested ${data.total_records} records.`;
-            statusEl.className = "status-line success-text";
-          } else {
-            statusEl.textContent = data.error || "Ingestion failed.";
-            statusEl.className = "status-line error-text";
-          }
-        } catch (err) {
-          statusEl.textContent = err.message;
-          statusEl.className = "status-line error-text";
-        }
-      });
-    </script>
+    <script src="/static/admin.js"></script>
     {% endif %}
   </main>
 </body>

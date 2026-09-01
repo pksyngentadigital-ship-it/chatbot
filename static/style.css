@@ -507,6 +507,22 @@ button { font-family: inherit; }
   padding-bottom: 0.6rem;
 }
 .feedback-log-time { color: var(--text-muted); font-size: 0.75rem; }
+.checkbox-row {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin: 0.8rem 0 0.4rem;
+  font-size: 0.85rem;
+  cursor: pointer;
+}
+.checkbox-row input { width: auto; margin: 0; }
+.admin-hint {
+  font-size: 0.78rem;
+  color: var(--text-muted);
+  line-height: 1.5;
+  margin: 0 0 1rem;
+}
+#ingest-report { margin-top: 0.8rem; }
 .admin-topbar {
   padding: 0.8rem 1.1rem;
   border-bottom: 1px solid var(--border);

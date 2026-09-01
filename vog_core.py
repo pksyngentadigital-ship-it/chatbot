@@ -22,6 +22,7 @@ LLM, then finalize with charts/downloads):
         # result["final_reply"], result["chart"], result["downloads"]
 """
 
+import hashlib
 import json
 import re
 import os
@@ -49,6 +50,12 @@ GROQ_MODEL = "openai/gpt-oss-20b"
 # requested period" back to a user who did specify a timeframe but whose
 # phrasing the date parser didn't recognize.
 DEFAULT_TIMEFRAME_LABEL = "all available feedback"
+
+# Pinecone caps total metadata at 40KB per vector. A single Excel cell can
+# hold 32k characters, and the old payload stored the bullet twice (once
+# raw, once inside a longer "text" sentence), so one long cell could reject
+# the whole 50-vector upsert batch it travelled in.
+MAX_VALUE_CHARS = 8000
 
 MONTH_TYPO_FIX = {
     "Feburary": "February", "Febuary": "February",
@@ -133,14 +140,38 @@ PRODUCT_LIST = [
 CROP_LIST = [
     "wheat", "rice", "paddy", "cotton", "maize", "corn", "sugarcane",
     "soybean", "soyabean", "groundnut", "mustard", "canola", "potato",
-    "tomato", "onion", "chilli", "chili", "gram", "chickpea", "pea", "peas",
-    "banana", "grape", "grapes", "sunflower", "okra", "lady finger",
-    "ladyfinger", "barley", "jowar", "bajra", "cabbage", "cauliflower",
-    "brinjal", "cucumber", "watermelon", "muskmelon", "melon", "mango",
-    "citrus", "orange", "apple", "turmeric", "ginger", "garlic", "sesame",
-    "castor", "tobacco", "rose", "roses", "papaya", "guava", "pomegranate",
-    "carrot", "radish", "spinach", "cumin", "coriander", "fenugreek"
+    "tomato", "onion", "chilli", "chili", "chickpea", "bengal gram",
+    "pea", "peas", "banana", "grape", "grapes", "sunflower", "okra",
+    "lady finger", "ladyfinger", "barley", "jowar", "bajra", "cabbage",
+    "cauliflower", "brinjal", "cucumber", "watermelon", "muskmelon",
+    "melon", "mango", "citrus", "orange", "apple", "turmeric", "ginger",
+    "garlic", "sesame", "castor", "tobacco", "papaya", "guava",
+    "pomegranate", "carrot", "radish", "spinach", "cumin", "coriander",
+    "fenugreek",
+    # NOTE: bare "gram" and "rose" are deliberately NOT in this list.
+    # "gram" is a unit of mass and appears in nearly every dosage note
+    # ("apply 50 gram per acre"), which made Gram a top-ranked crop;
+    # "rose" is far more often the verb ("prices rose sharply"). The real
+    # crops are reachable via "bengal gram"/"chickpea" and the guarded
+    # pattern in CROP_GUARDED below.
 ]
+
+# Crops whose bare name is ambiguous, matched only in unmistakably
+# agronomic phrasing. Maps a regex to the canonical crop label.
+CROP_GUARDED = {
+    r'\b(?:bengal\s+gram|green\s+gram|black\s+gram|horse\s+gram)\b': "Chickpea",
+    r'\brose\s+(?:crop|plants?|cultivation|growers?|farms?)\b': "Rose",
+    r'\b(?:cut\s+)?roses\b': "Rose",
+}
+
+# Synonyms collapse to one canonical label so a ranking counts each crop
+# once. Without this, rice(2)+paddy(2) lost the top slot to cotton(2).
+CROP_CANONICAL = {
+    "paddy": "Rice", "corn": "Maize", "soyabean": "Soybean",
+    "chili": "Chilli", "grapes": "Grape", "peas": "Pea",
+    "ladyfinger": "Okra", "lady finger": "Okra", "roses": "Rose",
+    "chickpea": "Chickpea", "bengal gram": "Chickpea",
+}
 
 # Diseases, pests, and agronomic problems that must NEVER be reported back to
 # the user as if they were products — the raw feedback text often names them
@@ -329,58 +360,72 @@ SUGGESTED_PROMPTS_QUICK = [
 # ==========================================
 
 def find_category_column(df_columns):
+    """Prefer an exact 'category' header. Falling back to the first header
+    merely CONTAINING 'categ' picked 'Sub Category' over 'Category' and
+    'Categorization Notes' over the real column — and the wrong column then
+    drove the entire Layout A branch, tagging every record with a value that
+    normalizes to nothing and therefore lands as sentiment='neutral'."""
+    exact_targets = {"category", "case category", "casecategory"}
     for col in df_columns:
-        col_clean = re.sub(r'\s+', '', str(col)).lower()
-        if 'categ' in col_clean:
+        if re.sub(r'\s+', ' ', str(col)).strip().lower() in exact_targets:
+            return col
+    for col in df_columns:
+        if 'categ' in re.sub(r'\s+', '', str(col)).lower():
             return col
     return None
 
 
 def infer_year_for_sheet(sheet_name: str, all_sheet_names: list) -> str | None:
-    """ Sheets that carry an explicit 4-digit year in their name are trusted directly. Older legacy sheets (e.g. "Jan till June", "July till December") have no year in the name at all — for those, infer the year from neighboring dated sheets: a sheet appearing BEFORE the first explicitly-dated sheet is assumed to be from the year immediately preceding that dated sheet (legacy history predates the dated sheets); one appearing AFTER the last dated sheet is assumed to follow it by one year. """
-    direct = re.search(r'(20\d{2})', sheet_name.strip())
+    """ Sheets carrying an explicit 4-digit year are trusted directly. Undated legacy sheets ("Jan till June") are dated from their NEAREST dated neighbour by position — the previous implementation took the global min of all later sheets / max of all earlier ones, which for ['Legacy', 'VOG 2026', 'VOG 2025'] produced 2024 instead of 2025, and could silently assign a legacy sheet the same year as a real dated sheet, double-counting every record in it. Returns None rather than guessing when the inferred year would collide with an explicitly-dated sheet. """
+    direct = re.search(r'\b(20\d{2})\b', sheet_name.strip())
     if direct:
-        return direct.group(0)
+        return direct.group(1)
 
     dated = [
-        (i, int(m.group(0)))
+        (i, int(m.group(1)))
         for i, name in enumerate(all_sheet_names)
-        for m in [re.search(r'(20\d{2})', name.strip())] if m
+        for m in [re.search(r'\b(20\d{2})\b', str(name).strip())] if m
     ]
     if not dated:
         return None
 
-    try:
-        my_index = all_sheet_names.index(sheet_name) if sheet_name in all_sheet_names else None
-        if my_index is None:
-            for i, name in enumerate(all_sheet_names):
-                if name.strip() == sheet_name:
-                    my_index = i
-                    break
-    except ValueError:
-        my_index = None
-
+    my_index = None
+    for i, name in enumerate(all_sheet_names):
+        if str(name).strip() == sheet_name.strip():
+            my_index = i
+            break
     if my_index is None:
         return None
 
-    later = [year for i, year in dated if i > my_index]
-    if later:
-        return str(min(later) - 1)
+    # Nearest dated sheet by positional distance, not global min/max.
+    nearest_i, nearest_year = min(dated, key=lambda t: (abs(t[0] - my_index), t[0]))
+    guess = nearest_year - 1 if nearest_i > my_index else nearest_year + 1
 
-    earlier = [year for i, year in dated if i < my_index]
-    if earlier:
-        return str(max(earlier) + 1)
-
-    return None
+    claimed = {year for _, year in dated}
+    if guess in claimed:
+        # Refuse rather than duplicate an explicitly-dated sheet's year.
+        return None
+    return str(guess)
 
 
 def normalize_category(raw_val):
-    if not raw_val:
+    """Returns the canonical category name, or None when the value does not
+    map to a known category. Previously an unknown spelling was passed
+    through verbatim and then silently tagged sentiment='neutral' — so
+    'Complaint / Negative Feedback' (spaces around the slash) made an entire
+    sheet of complaints invisible to every complaint query. Callers now get
+    None and are expected to record it as a skipped/unmapped value."""
+    if raw_val is None:
         return None
-    cleaned = re.sub(r'\s+', ' ', str(raw_val)).strip().lower()
+    cleaned = re.sub(r'\s*/\s*', '/', re.sub(r'\s+', ' ', str(raw_val)).strip().lower())
+    if not cleaned or cleaned in EMPTY_VALUES:
+        return None
     if cleaned in CATEGORY_NORMALIZE:
         return CATEGORY_NORMALIZE[cleaned]
-    return str(raw_val).strip()
+    # Tolerate a trailing plural ("Positive Feedbacks").
+    if cleaned.endswith("s") and cleaned[:-1] in CATEGORY_NORMALIZE:
+        return CATEGORY_NORMALIZE[cleaned[:-1]]
+    return None
 
 
 def is_empty_cell(value: str) -> bool:
@@ -388,27 +433,41 @@ def is_empty_cell(value: str) -> bool:
 
 
 def split_bullets(cell_text: str) -> list[str]:
-    lines = cell_text.split('\n')
+    """Split a cell into individual feedback points. Splits on newlines AND
+    on inline bullet glyphs / sentence-ending semicolons — a cell authored
+    as "• A • B • C" on one line used to become a single record with one
+    blended set of crop/product tags."""
+    parts = re.split(r'[\n\r]+|\s+[•●·]\s*|(?<=[.;])\s+(?=[A-Z0-9])', cell_text)
     bullets = []
-    for line in lines:
+    for line in parts:
+        if line is None:
+            continue
         clean = re.sub(r'^[\s•●·\-–—]+', '', line).strip()
-        if clean and clean.lower() not in EMPTY_VALUES and len(clean) > 3:
+        if clean and clean.lower() not in EMPTY_VALUES and len(clean) >= 2:
             bullets.append(clean)
     return bullets
 
 
+_MONTH_RE = re.compile(
+    r'\b(january|february|march|april|may|june|july|august'
+    r'|september|october|november|december'
+    r'|jan|feb|mar|apr|jun|jul|aug|sep|oct|nov|dec)\b',
+    re.IGNORECASE,
+)
+
+
 def extract_month_from_col(col: str) -> str:
-    match = re.search(
-        r'(january|february|march|april|may|june|july|august'
-        r'|september|october|november|december'
-        r'|jan|feb|mar|apr|jun|jul|aug|sep|oct|nov|dec)',
-        col.lower()
-    )
+    """Word-boundary month match. Without \\b the alternation matched inside
+    ordinary words — 'Remarks' -> March, 'Summary' -> March,
+    'Decrease' -> December, 'Separate' -> September — which filed real rows
+    under a month nobody wrote."""
+    fixed = str(col)
+    for typo, correct in MONTH_TYPO_FIX.items():
+        fixed = re.sub(r'\b' + typo + r'\b', correct, fixed, flags=re.IGNORECASE)
+    match = _MONTH_RE.search(fixed)
     if not match:
         return "Unknown"
-    raw  = match.group(0).capitalize()
-    full = MONTH_MAP.get(raw.lower(), raw)
-    return MONTH_TYPO_FIX.get(full, full)
+    return MONTH_MAP.get(match.group(1).lower(), match.group(1).capitalize())
 
 
 def get_latest_year_from_index(index) -> str:
@@ -786,15 +845,24 @@ def filter_bullets_by_crop(bullets: list[str], crop: str) -> list[str]:
     return [b for b in bullets if crop.lower() in b.lower()]
 
 
+def canonical_crop(crop: str) -> str:
+    """Collapse crop synonyms (paddy->Rice, corn->Maize) to one label."""
+    return CROP_CANONICAL.get(crop.strip().lower(), crop.strip().title())
+
+
 def extract_crops(text: str) -> list[str]:
-    """Tag every known crop mentioned in a feedback bullet, for ingestion-time metadata."""
+    """Tag every known crop mentioned in a feedback bullet, for ingestion-time
+    metadata. Synonyms are collapsed so each real crop is counted once."""
     text_lower = text.lower()
     found = []
     for crop in CROP_LIST:
         if re.search(r'\b' + re.escape(crop) + r'\b', text_lower):
-            label = crop.title()
+            label = canonical_crop(crop)
             if label not in found:
                 found.append(label)
+    for pattern, label in CROP_GUARDED.items():
+        if re.search(pattern, text_lower) and label not in found:
+            found.append(label)
     return found
 
 
@@ -820,32 +888,66 @@ GENERIC_CAPITALIZED_STOPWORDS = {
 PRODUCT_STOPWORDS |= GENERIC_CAPITALIZED_STOPWORDS
 
 
-def extract_product_mentions(text: str) -> list[str]:
-    """ Tag likely product/brand names mentioned in a feedback bullet, for ingestion-time metadata used by deterministic ranking ("which product received the highest complaints"). Two passes: (1) known catalog products (PRODUCT_LIST) matched anywhere in the text and tagged with a canonical name — reliable even if the product isn't capitalized in the source text; (2) a capitalized-phrase heuristic fallback for brand names not yet in the curated list, filtered against a broad stopword set so sentence-initial adjectives/transition words don't get mistaken for products. """
-    text_lower = text.lower()
-    out, seen = [], set()
+# Catalog entries that are also ordinary English words. Matching these
+# case-insensitively tagged "did not match the description" as the product
+# Match, and "NPS score dropped" as Score. They only count as products when
+# capitalized in the source text.
+AMBIGUOUS_PRODUCT_WORDS = {
+    "match", "score", "enrich", "dragon", "tilt", "polo", "walter",
+    "cruiser", "karate", "dynasty", "revus", "plenum",
+}
 
+
+def _canonical_product(product: str) -> str:
+    return " ".join(
+        w.upper() if w.lower() in ("sop", "cst", "npk") else w.capitalize()
+        for w in product.split()
+    )
+
+
+def extract_product_mentions(text: str) -> list[str]:
+    """ Tag likely product/brand names in a feedback bullet, for the ingestion-time metadata that deterministic ranking counts. Pass 1 matches the curated PRODUCT_LIST; pass 2 is a capitalized-phrase heuristic for brands not yet catalogued. Three corrections over the naive version: a catalog match that is a strict prefix of another match on the same bullet is dropped (so "Isabion Gold" no longer also credits "Isabion", which inflated base names and split variant counts); catalog entries that are ordinary English words must be capitalized in the source; and a capitalized phrase is rejected if ANY of its words is a stopword (the previous `all(...)` let "PRICE TOO HIGH" through as a brand because only "price" was listed). """
+    text_lower = text.lower()
+    seen = set()
+
+    catalog_hits = []
     for product in PRODUCT_LIST:
-        if re.search(r'\b' + re.escape(product) + r'\b', text_lower):
-            canonical = " ".join(
-                w.upper() if w.lower() in ("sop", "cst", "npk") else w.capitalize()
-                for w in product.split()
-            )
-            key = canonical.lower()
-            if key not in seen:
-                seen.add(key)
-                out.append(canonical)
+        if not re.search(r'\b' + re.escape(product) + r'\b', text_lower):
+            continue
+        if product in AMBIGUOUS_PRODUCT_WORDS:
+            # Require the capitalized form in the original text.
+            if not re.search(r'\b' + re.escape(product.title()) + r'\b', text):
+                continue
+        catalog_hits.append(product)
+
+    # Drop any catalog hit that is a strict prefix of a longer hit.
+    filtered = [
+        p for p in catalog_hits
+        if not any(other != p and other.startswith(p + " ") for other in catalog_hits)
+    ]
+
+    out = []
+    for product in filtered:
+        canonical = _canonical_product(product)
+        if canonical.lower() not in seen:
+            seen.add(canonical.lower())
+            out.append(canonical)
 
     candidates = re.findall(r'\b([A-Z][a-zA-Z]{2,}(?:\s+[A-Z][a-zA-Z]{2,}){0,2})\b', text)
     for cand in candidates:
         words = cand.split()
-        if all(w.lower() in PRODUCT_STOPWORDS or w.lower() in MONTH_MAP for w in words):
+        lowered = [w.lower() for w in words]
+        # ANY stopword disqualifies the phrase, not only all-of-them.
+        if any(w in PRODUCT_STOPWORDS or w in MONTH_MAP for w in lowered):
             continue
-        if any(w.lower() in DISEASE_PEST_WORDS for w in words):
+        if any(w in DISEASE_PEST_WORDS for w in lowered):
             continue
-        if any(w.lower() in GENERIC_CAPITALIZED_STOPWORDS for w in words):
+        if any(w in GENERIC_CAPITALIZED_STOPWORDS for w in lowered):
             continue
         if cand.strip().lower() in ("syngenta",):
+            continue
+        # Multi-word ALL-CAPS is shouted feedback ("PRICE TOO HIGH"), not a brand.
+        if len(words) > 1 and cand.isupper():
             continue
         key = cand.strip().lower()
         if key not in seen:
@@ -1401,7 +1503,21 @@ def build_system_prompt(query_intent, timeframe_label, explicit_list_format, act
 # EXCEL INGESTION (no UI calls — raises on error, returns a summary dict)
 # ==========================================
 
-def _make_metadata_payload(inferred_year, row_month, week_label, category, bullet):
+def _make_metadata_payload(inferred_year, row_month, week_label, category, bullet,
+                           sheet_name="", src_row=-1, ingest_run="", week_num=None):
+    """Build the embedding text and the Pinecone metadata for one bullet.
+
+    Provenance (sheet / src_row / ingest_run) is stored so a re-ingest can
+    delete exactly what it is replacing. Without it there was no way to
+    scope a delete, so corrections could never take effect: the old vector
+    simply stayed in the index forever.
+
+    The old "text" field duplicated the whole bullet inside a longer
+    sentence and was stored alongside "value", roughly doubling metadata
+    size for no benefit — a single long cell could push a payload past
+    Pinecone's 40KB limit and reject the entire 50-vector batch. It is
+    reconstructible from the other fields, so it is no longer stored.
+    """
     is_positive = category in POSITIVE_CATEGORIES
     is_negative = category in NEGATIVE_CATEGORIES
     context_chunk = (
@@ -1411,8 +1527,7 @@ def _make_metadata_payload(inferred_year, row_month, week_label, category, bulle
         f"Case Category: {category}. "
         f"Feedback: {bullet}."
     )
-    return context_chunk, {
-        "text":      context_chunk,
+    metadata = {
         "month":     row_month,
         "year":      inferred_year,
         "week":      week_label,
@@ -1422,49 +1537,148 @@ def _make_metadata_payload(inferred_year, row_month, week_label, category, bulle
             else "negative" if is_negative
             else "neutral"
         ),
-        "value":    bullet,
+        "value":    bullet[:MAX_VALUE_CHARS],
         "crop":     ",".join(extract_crops(bullet)),
         "products": ",".join(extract_product_mentions(bullet)),
+        "sheet":    sheet_name,
+        "src_row":  int(src_row),
+        "ingest_run": ingest_run,
     }
+    if week_num is not None:
+        # Stored as an integer so week can be a database-level filter
+        # instead of a Python substring test applied after the top_k cut.
+        metadata["week_num"] = int(week_num)
+    if len(bullet) > MAX_VALUE_CHARS:
+        metadata["truncated"] = True
+    return context_chunk, metadata
 
 
-def run_ingestion(file_bytes: bytes, pinecone_api_key: str) -> dict:
-    """ Parse the Voice of Grower workbook (both known sheet layouts), tag each feedback bullet with crop/product/sentiment/category metadata, embed it, and upsert into Pinecone. Returns {"total_records": int}. Raises ValueError if nothing was found, or whatever exception the Pinecone/pandas calls raise on failure — callers (Streamlit, FastAPI, a CLI) decide how to surface that. """
+def _vector_id(sheet: str, category: str, week_label: str, row: int, bullet_idx: int, bullet: str) -> str:
+    """Content-addressed id.
+
+    The previous scheme concatenated row and bullet indexes with no
+    separator ("...{idx}{b_idx}"), so row 1/bullet 12 and row 11/bullet 2
+    both produced "...112" and the second silently overwrote the first —
+    16 records reported ingested, 13 actually stored. Hashing the content
+    also makes re-ingesting unchanged rows idempotent.
+    """
+    basis = f"{sheet}|{category}|{week_label}|{row}|{bullet_idx}|{bullet}"
+    return "v_" + hashlib.sha1(basis.encode("utf-8")).hexdigest()
+
+
+def _clean_cell_text(cell_val) -> str | None:
+    """Return usable feedback text, or None if this cell isn't feedback.
+
+    Guards against non-text cells: a date cell stringified to
+    '2026-01-05 00:00:00' and a float to '12.0', both of which were being
+    embedded and counted as grower feedback.
+    """
+    if cell_val is None:
+        return None
+    if isinstance(cell_val, (int, float, bool)):
+        return None
+    text = str(cell_val).strip()
+    if not text or is_empty_cell(text):
+        return None
+    if re.fullmatch(r'[\d.\-:/ ]+', text):
+        return None
+    if re.fullmatch(r'\d{4}-\d{2}-\d{2}[ T].*', text):
+        return None
+    return text
+
+
+def _week_number(week_label: str) -> int | None:
+    """Parse the ordinal from a week label ('2nd Week January' -> 2).
+
+    Matches the ordinal specifically rather than the first integer in the
+    string — a column named 'March 2026 Week 1' previously yielded 2026.
+    """
+    m = re.search(r'\b(\d{1,2})\s*(?:st|nd|rd|th)\b', week_label, re.IGNORECASE)
+    if m:
+        n = int(m.group(1))
+        return n if 1 <= n <= 6 else None
+    m = re.search(r'\bweek\s*(\d{1,2})\b', week_label, re.IGNORECASE)
+    if m:
+        n = int(m.group(1))
+        return n if 1 <= n <= 6 else None
+    return None
+
+
+_WEEK_COL_RE = re.compile(r'^w(?:ee)?k(?:\s*(?:no\.?|number|#))?$', re.IGNORECASE)
+
+
+def run_ingestion(file_bytes: bytes, pinecone_api_key: str, purge_first: bool = False) -> dict:
+    """Parse the workbook, tag each bullet, embed, and upsert into Pinecone.
+
+    Returns {"total_records", "summary", "skipped", "ingest_run"}. The
+    "skipped" list is the important addition: previously four separate
+    silent `continue` paths could drop entire sheets while the call still
+    reported success, so a workbook could half-ingest with no indication.
+
+    purge_first=True deletes the whole index before writing. Required once
+    after any change to the tagging logic, because vectors already in the
+    index keep their old (wrong) metadata — re-ingesting alone does not
+    repair them.
+    """
     excel_file = pd.ExcelFile(BytesIO(file_bytes))
     all_sheets = excel_file.sheet_names
 
     pc = Pinecone(api_key=pinecone_api_key)
     index = pc.Index(PINECONE_INDEX_NAME)
 
+    ingest_run = hashlib.sha1(f"{len(file_bytes)}|{','.join(map(str, all_sheets))}".encode()).hexdigest()[:12]
+
     payload_batch = []
     text_inputs_for_embedding = []
     discovered_data_summary = {}
+    skipped: list[dict] = []
+
+    def skip(sheet, reason, detail=""):
+        skipped.append({"sheet": str(sheet), "reason": reason, "detail": str(detail)})
 
     for sheet_name in all_sheets:
-        sheet_clean = sheet_name.strip()
-        inferred_year = infer_year_for_sheet(sheet_clean, all_sheets)
+        sheet_clean = str(sheet_name).strip()
+        inferred_year = infer_year_for_sheet(sheet_clean, [str(s) for s in all_sheets])
         if not inferred_year:
+            skip(sheet_clean, "no_year", "Could not infer a year for this sheet, or the inferred year would duplicate an explicitly dated sheet.")
             continue
 
         df = pd.read_excel(excel_file, sheet_name=sheet_name)
         df.columns = [re.sub(r'\s+', ' ', str(c)).strip() for c in df.columns]
+
+        # Duplicate labels make row[col] return a Series, whose repr
+        # ('Name: 0, dtype: str') was being ingested as feedback text.
+        if pd.Index(df.columns).duplicated().any():
+            dupes = sorted({c for c in df.columns if list(df.columns).count(c) > 1})
+            skip(sheet_clean, "duplicate_columns", f"Columns collide after whitespace normalization: {dupes}")
+            continue
 
         cat_col = find_category_column(df.columns)
 
         if cat_col:
             # ── LAYOUT A: categories are ROWS, weeks are COLUMNS ──
             week_cols = [c for c in df.columns if 'week' in c.lower()]
+            if not week_cols:
+                skip(sheet_clean, "no_week_columns", "Layout A detected (a category column exists) but no column header contains 'week'.")
+                continue
 
+            # Merged category cells give the value only to the first row;
+            # every continuation row came back NaN and was dropped. Layout B
+            # already forward-filled month/week; Layout A filled nothing.
+            df[cat_col] = df[cat_col].replace(r'^\s*$', pd.NA, regex=True).ffill()
+
+            unmapped = set()
             for idx, row in df.iterrows():
-                raw_category = row.get(cat_col, None)
-                category = normalize_category(raw_category)
-
-                if not category or str(raw_category).strip().lower() in EMPTY_VALUES:
+                category = normalize_category(row.get(cat_col, None))
+                if not category:
+                    raw = str(row.get(cat_col, "")).strip()
+                    if raw and raw.lower() not in EMPTY_VALUES:
+                        unmapped.add(raw)
                     continue
 
                 for col in week_cols:
-                    cell_raw = str(row[col]).strip()
-                    if is_empty_cell(cell_raw):
+                    cell_raw = _clean_cell_text(row[col])
+                    if cell_raw is None:
                         continue
 
                     bullets = split_bullets(cell_raw)
@@ -1472,6 +1686,10 @@ def run_ingestion(file_bytes: bytes, pinecone_api_key: str) -> dict:
                         continue
 
                     row_month = extract_month_from_col(col)
+                    if row_month == "Unknown":
+                        skip(sheet_clean, "unparseable_month", f"Week column '{col}' contains no month name; its rows are unreachable by any month filter and were skipped.")
+                        continue
+
                     stat_key = f"{row_month} {inferred_year}"
                     discovered_data_summary[stat_key] = (
                         discovered_data_summary.get(stat_key, 0) + len(bullets)
@@ -1479,15 +1697,18 @@ def run_ingestion(file_bytes: bytes, pinecone_api_key: str) -> dict:
 
                     for b_idx, bullet in enumerate(bullets):
                         context_chunk, metadata_payload = _make_metadata_payload(
-                            inferred_year, row_month, col, category, bullet
+                            inferred_year, row_month, col, category, bullet,
+                            sheet_name=sheet_clean, src_row=idx, ingest_run=ingest_run,
+                            week_num=_week_number(col),
                         )
-                        clean_cat = re.sub(r'[^a-zA-Z0-9]', '', category.replace(' ', '_'))
-                        clean_col = re.sub(r'[^a-zA-Z0-9]', '', col.replace(' ', '_'))
-                        clean_sheet = re.sub(r'[^a-zA-Z0-9]', '', sheet_clean.replace(' ', '_'))
-                        vector_id = f"v_{clean_sheet}{clean_cat}{clean_col}{idx}{b_idx}"
-
-                        payload_batch.append({"id": vector_id, "metadata": metadata_payload})
+                        payload_batch.append({
+                            "id": _vector_id(sheet_clean, category, col, idx, b_idx, bullet),
+                            "metadata": metadata_payload,
+                        })
                         text_inputs_for_embedding.append(context_chunk)
+
+            if unmapped:
+                skip(sheet_clean, "unmapped_categories", f"These category values are not recognized and their rows were skipped: {sorted(unmapped)}")
 
         else:
             # ── LAYOUT B: Month/Week are ROW values, categories are COLUMN headers ──
@@ -1495,24 +1716,48 @@ def run_ingestion(file_bytes: bytes, pinecone_api_key: str) -> dict:
 
             header_row_idx = None
             for i in range(min(10, len(df_raw))):
-                row_vals = [str(v).strip().lower() for v in df_raw.iloc[i].tolist()]
-                if 'month' in row_vals:
+                row_vals = [re.sub(r'\s+', ' ', str(v)).strip().lower() for v in df_raw.iloc[i].tolist()]
+                if any(v == 'month' for v in row_vals):
                     header_row_idx = i
                     break
             if header_row_idx is None:
+                skip(sheet_clean, "no_header_row", "Layout B expected but no row in the first 10 contains a 'Month' header cell.")
                 continue
 
-            col_map = {}
-            for j, v in enumerate(df_raw.iloc[header_row_idx].tolist()):
+            # Forward-fill the header row so a merged header spanning two
+            # columns doesn't silently discard the second column's data.
+            header_cells = df_raw.iloc[header_row_idx].tolist()
+            col_map, last_label = {}, None
+            for j, v in enumerate(header_cells):
                 text = re.sub(r'\s+', ' ', str(v)).strip()
                 if text and text.lower() != 'nan':
+                    last_label = text
                     col_map[j] = text
+                elif last_label is not None:
+                    col_map[j] = last_label
 
             month_col_idx = next((i for i, v in col_map.items() if v.strip().lower() == 'month'), None)
-            week_col_idx = next((i for i, v in col_map.items() if v.strip().lower() == 'week'), None)
-            category_cols = {i: v for i, v in col_map.items() if i not in (month_col_idx, week_col_idx)}
+            week_col_idx = next((i for i, v in col_map.items() if _WEEK_COL_RE.match(v.strip())), None)
+
+            # Only columns whose header resolves to a KNOWN category are
+            # feedback. Previously every non-Month/Week column qualified, so
+            # Region / Remarks / Dealer values were ingested as feedback and
+            # region names were counted as products.
+            category_cols = {}
+            rejected_headers = []
+            for i, v in col_map.items():
+                if i in (month_col_idx, week_col_idx):
+                    continue
+                if normalize_category(v):
+                    category_cols[i] = v
+                else:
+                    rejected_headers.append(v)
+
             if month_col_idx is None or not category_cols:
+                skip(sheet_clean, "no_category_columns", f"No column header maps to a known feedback category. Headers seen: {sorted(set(col_map.values()))}")
                 continue
+            if rejected_headers:
+                skip(sheet_clean, "ignored_columns", f"Not feedback categories, so not ingested: {sorted(set(rejected_headers))}")
 
             current_month = None
             current_week = None
@@ -1521,7 +1766,17 @@ def run_ingestion(file_bytes: bytes, pinecone_api_key: str) -> dict:
 
                 mval = row[month_col_idx]
                 if pd.notna(mval) and str(mval).strip():
-                    current_month = extract_month_from_col(str(mval).strip())
+                    parsed = extract_month_from_col(str(mval).strip())
+                    if parsed == "Unknown":
+                        # A 'Total'/'Notes' row must not overwrite the
+                        # forward-filled month for every row beneath it.
+                        continue
+                    if parsed != current_month:
+                        # Reset the week when the month changes, or a blank
+                        # week cell on a month's first row inherits the
+                        # previous month's last week.
+                        current_week = None
+                    current_month = parsed
 
                 if week_col_idx is not None:
                     wval = row[week_col_idx]
@@ -1538,11 +1793,8 @@ def run_ingestion(file_bytes: bytes, pinecone_api_key: str) -> dict:
                     if not category:
                         continue
 
-                    cell_val = row[col_idx]
-                    if pd.isna(cell_val):
-                        continue
-                    cell_raw = str(cell_val).strip()
-                    if is_empty_cell(cell_raw):
+                    cell_raw = _clean_cell_text(row[col_idx])
+                    if cell_raw is None:
                         continue
 
                     bullets = split_bullets(cell_raw)
@@ -1556,48 +1808,81 @@ def run_ingestion(file_bytes: bytes, pinecone_api_key: str) -> dict:
 
                     for b_idx, bullet in enumerate(bullets):
                         context_chunk, metadata_payload = _make_metadata_payload(
-                            inferred_year, current_month, week_label, category, bullet
+                            inferred_year, current_month, week_label, category, bullet,
+                            sheet_name=sheet_clean, src_row=r, ingest_run=ingest_run,
+                            week_num=_week_number(week_label),
                         )
-                        clean_cat = re.sub(r'[^a-zA-Z0-9]', '', category.replace(' ', '_'))
-                        clean_week = re.sub(r'[^a-zA-Z0-9]', '', week_label.replace(' ', '_'))
-                        clean_sheet = re.sub(r'[^a-zA-Z0-9]', '', sheet_clean.replace(' ', '_'))
-                        vector_id = f"v_{clean_sheet}{clean_cat}{clean_week}{r}{b_idx}"
-
-                        payload_batch.append({"id": vector_id, "metadata": metadata_payload})
+                        payload_batch.append({
+                            "id": _vector_id(sheet_clean, category, week_label, r, b_idx, bullet),
+                            "metadata": metadata_payload,
+                        })
                         text_inputs_for_embedding.append(context_chunk)
+
+    # Collapse any duplicate ids before embedding, so the reported count
+    # matches what actually lands in the index.
+    deduped, seen_ids = [], set()
+    deduped_texts = []
+    for item, text in zip(payload_batch, text_inputs_for_embedding):
+        if item["id"] in seen_ids:
+            continue
+        seen_ids.add(item["id"])
+        deduped.append(item)
+        deduped_texts.append(text)
+    payload_batch, text_inputs_for_embedding = deduped, deduped_texts
 
     total_records = len(payload_batch)
     if total_records == 0:
-        raise ValueError("No records found in the uploaded workbook.")
+        raise ValueError(
+            "No records found in the uploaded workbook."
+            + (f" Skipped: {skipped}" if skipped else "")
+        )
 
+    if purge_first:
+        # Vectors already in the index keep their old metadata, and the
+        # content-hash ids of corrected rows differ from the positional ids
+        # they replace — so without a purge the stale records survive.
+        try:
+            index.delete(delete_all=True)
+        except Exception as e:
+            raise RuntimeError(f"Purge requested but the index delete failed, so ingestion was aborted to avoid mixing old and new data: {e}")
+
+    # Embed and upsert in the SAME pass. Collecting every embedding first
+    # meant peak memory held the whole dataset (~12KB/record), which OOMs a
+    # 512MB instance well before a realistic workbook is finished.
     BATCH_LIMIT = 96
-    all_vectors = []
-
+    written = 0
     for i in range(0, total_records, BATCH_LIMIT):
         text_batch = text_inputs_for_embedding[i: i + BATCH_LIMIT]
+        meta_batch = payload_batch[i: i + BATCH_LIMIT]
+
         embeddings_response = pc.inference.embed(
             model="llama-text-embed-v2",
             inputs=text_batch,
             parameters={"input_type": "passage", "dimension": EMBEDDING_DIMENSION}
         )
-        all_vectors.extend([item.values for item in embeddings_response])
+        values = [item.values for item in embeddings_response]
+        if len(values) != len(meta_batch):
+            # Positional pairing means a short response would silently
+            # attach every later vector to the wrong metadata.
+            raise RuntimeError(
+                f"Embedding count mismatch ({len(values)} vectors for {len(meta_batch)} records); "
+                f"aborted after {written} records to avoid writing mismatched data."
+            )
 
-    upsert_buffer = []
-    for i, item in enumerate(payload_batch):
-        upsert_buffer.append({
-            "id": item["id"],
-            "values": all_vectors[i],
-            "metadata": item["metadata"]
-        })
-        if len(upsert_buffer) >= 50:
-            index.upsert(vectors=upsert_buffer)
-            upsert_buffer = []
+        vectors = [
+            {"id": m["id"], "values": v, "metadata": m["metadata"]}
+            for m, v in zip(meta_batch, values)
+        ]
+        for j in range(0, len(vectors), 50):
+            index.upsert(vectors=vectors[j: j + 50])
+        written += len(vectors)
 
-    if upsert_buffer:
-        index.upsert(vectors=upsert_buffer)
-
-    return {"total_records": total_records, "summary": discovered_data_summary}
-
+    return {
+        "total_records": written,
+        "summary": discovered_data_summary,
+        "skipped": skipped,
+        "ingest_run": ingest_run,
+    }
 
 # ==========================================
 # CHAT ORCHESTRATION (two-phase: process → stream LLM yourself → finalize)

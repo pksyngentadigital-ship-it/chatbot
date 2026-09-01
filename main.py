@@ -265,7 +265,7 @@ def admin_clear_feedback_log(request: Request):
 
 
 @app.post("/admin/ingest")
-async def admin_ingest(request: Request, file: UploadFile = File(...)):
+async def admin_ingest(request: Request, file: UploadFile = File(...), purge_first: str = Form("")):
     if not request.session.get("authenticated"):
         raise HTTPException(status_code=401, detail="Not authenticated")
     if not PINECONE_API_KEY:
@@ -291,11 +291,15 @@ async def admin_ingest(request: Request, file: UploadFile = File(...)):
         # directly from an async handler it would block the event loop and
         # take the whole server down (including /health, which makes Render
         # restart the instance mid-upload).
-        result = await run_in_threadpool(vog_core.run_ingestion, file_bytes, PINECONE_API_KEY)
+        result = await run_in_threadpool(
+            vog_core.run_ingestion, file_bytes, PINECONE_API_KEY,
+            str(purge_first).lower() in ("1", "true", "on", "yes"),
+        )
         return {
             "success": True,
             "total_records": result["total_records"],
             "skipped": result.get("skipped", []),
+            "summary": result.get("summary", {}),
         }
     except ValueError as e:
         return Response(content=json.dumps({"success": False, "error": str(e)}), status_code=400, media_type="application/json")
