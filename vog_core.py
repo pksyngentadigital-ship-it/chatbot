@@ -42,7 +42,10 @@ from pptx.enum.chart import XL_CHART_TYPE
 # ==========================================
 PINECONE_INDEX_NAME = "chatbot"
 EMBEDDING_DIMENSION = 384
-GROQ_MODEL = "openai/gpt-oss-20b"
+# Overridable without a code change so the model can be A/B'd or rolled
+# back from the Render dashboard alone — the Llama retirement earlier
+# required a code edit and a full redeploy to recover from.
+GROQ_MODEL = os.getenv("GROQ_MODEL", "openai/gpt-oss-120b")
 
 # Fallback timeframe label used only when a query genuinely mentions no
 # date at all — reads naturally in phrases like "Complaints of {label}:"
