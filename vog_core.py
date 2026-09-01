@@ -1975,7 +1975,7 @@ def process_chat_query(user_query: str, pinecone_api_key: str, groq_api_key: str
 
 
 def call_groq(system_prompt: str, user_prompt: str, groq_api_key: str, max_tokens: int = 500):
-    """ Thin convenience wrapper — returns the Groq stream iterator. Each UI decides how to consume it: Streamlit updates st.empty() per chunk, a FastAPI endpoint would forward chunks as SSE. """
+    """ Thin convenience wrapper — returns the Groq stream iterator. Each UI decides how to consume it: Streamlit updates st.empty() per chunk, a FastAPI endpoint would forward chunks as SSE. GROQ_MODEL is currently a reasoning model (openai/gpt-oss-20b) — reasoning_effort="low" keeps it from spending the whole token budget on internal chain-of-thought before ever emitting visible content. """
     client = Groq(api_key=groq_api_key)
     return client.chat.completions.create(
         model=GROQ_MODEL,
@@ -1985,6 +1985,7 @@ def call_groq(system_prompt: str, user_prompt: str, groq_api_key: str, max_token
         ],
         temperature=0.1,
         max_tokens=max_tokens,
+        reasoning_effort="low",
         stream=True
     )
 
@@ -2014,7 +2015,8 @@ def generate_followup_suggestions(query_intent, subject_label, timeframe_label, 
             model=GROQ_MODEL,
             messages=[{"role": "user", "content": prompt}],
             temperature=0.4,
-            max_tokens=200,
+            max_tokens=300,
+            reasoning_effort="low",
         )
         parsed = json.loads(_strip_code_fence(resp.choices[0].message.content or ""))
         if not isinstance(parsed, list):
@@ -2043,7 +2045,8 @@ def generate_deterministic_narrative(dimension_label, top_name, top_count, bulle
             model=GROQ_MODEL,
             messages=[{"role": "system", "content": system_prompt}, {"role": "user", "content": user_prompt}],
             temperature=0.2,
-            max_tokens=150,
+            max_tokens=250,
+            reasoning_effort="low",
         )
         return (resp.choices[0].message.content or "").strip()
     except Exception:
@@ -2069,7 +2072,8 @@ def llm_assisted_query_understanding(user_query, groq_api_key):
             model=GROQ_MODEL,
             messages=[{"role": "system", "content": system_prompt}, {"role": "user", "content": user_query}],
             temperature=0.0,
-            max_tokens=100,
+            max_tokens=200,
+            reasoning_effort="low",
         )
         parsed = json.loads(_strip_code_fence(resp.choices[0].message.content or ""))
         if not isinstance(parsed, dict):
