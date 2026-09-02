@@ -242,8 +242,8 @@ def _collect_layout_b(rows, sheet, year, ingest_run, skip, tally, out):
 
 # ────────────────────────────── entry point ──────────────────────────
 
-def run_ingestion(file_bytes: bytes, pinecone_api_key: str,
-                  purge_first: bool = False) -> dict:
+def run_ingestion(file_bytes: bytes, pinecone_api_key: str | None = None,
+                  purge_first: bool = False, dry_run: bool = False) -> dict:
     """Parse, tag, embed and upsert. Returns total_records / summary /
     skipped / ingest_run.
 
@@ -254,6 +254,11 @@ def run_ingestion(file_bytes: bytes, pinecone_api_key: str,
     purge_first deletes the index before writing. Needed after any change
     to the tagging logic, because vectors already in the index keep their
     old metadata — re-ingesting alone does not repair them.
+
+    dry_run parses and tags everything but writes nothing and needs no API
+    key. The whole parse happens before the first network call, so this is
+    the real result — you can check a workbook against production's exact
+    rules without touching production.
     """
     import openpyxl
 
@@ -308,6 +313,14 @@ def run_ingestion(file_bytes: bytes, pinecone_api_key: str,
     if not payloads:
         raise ValueError("No records found in the uploaded workbook."
                          + (f" Skipped: {skipped}" if skipped else ""))
+
+    if dry_run:
+        return {"total_records": len(payloads), "summary": summary,
+                "skipped": skipped, "ingest_run": ingest_run, "dry_run": True}
+
+    if not pinecone_api_key:
+        raise ValueError("A Pinecone API key is required to write. "
+                         "Pass dry_run=True to parse without writing.")
 
     pc, index = retrieval.connect(pinecone_api_key)
 

@@ -290,3 +290,36 @@ def test_year_inference_refuses_to_duplicate_an_existing_year():
     # The naive guess (2025) collides with a real dated sheet, which would
     # double-count every record; refusing is correct.
     assert vc.infer_year_for_sheet("Legacy Jan-Jun", sheets) is None
+
+
+def test_dry_run_parses_fully_without_a_key_or_a_write(monkeypatch):
+    """The CLI's --dry-run must be the real parse result, so it can vet a
+    workbook against production's rules without touching production."""
+    def _boom(api_key):
+        raise AssertionError("dry_run must not open a Pinecone connection")
+    monkeypatch.setattr(retrieval, "connect", _boom)
+
+    df = pd.DataFrame({
+        "Category": ["Positive Feedback", "Not A Real Category"],
+        "1st Week January": ["Isabion did well on wheat", "should be skipped"],
+    })
+    buf = BytesIO()
+    with pd.ExcelWriter(buf, engine="openpyxl") as w:
+        df.to_excel(w, sheet_name="2026", index=False)
+
+    result = vc.run_ingestion(buf.getvalue(), None, dry_run=True)
+    assert result["dry_run"] is True
+    assert result["total_records"] == 1
+    assert result["summary"] == {"January 2026": 1}
+    assert [s["reason"] for s in result["skipped"]] == ["unmapped_categories"]
+
+
+def test_a_write_without_a_key_is_refused_rather_than_half_done():
+    df = pd.DataFrame({"Category": ["Positive Feedback"],
+                       "1st Week January": ["Isabion did well"]})
+    buf = BytesIO()
+    with pd.ExcelWriter(buf, engine="openpyxl") as w:
+        df.to_excel(w, sheet_name="2026", index=False)
+
+    with pytest.raises(ValueError, match="API key is required"):
+        vc.run_ingestion(buf.getvalue(), None)
