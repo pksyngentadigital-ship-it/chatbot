@@ -287,14 +287,49 @@ def _make_metadata_payload(inferred_year, row_month, week_label, category, bulle
     return context_chunk, metadata
 
 def extract_all_months(query_lower: str) -> list[str]:
-    """Return every distinct month mentioned in the query, in the order first seen."""
-    found = []
-    for shortcut in sorted(MONTH_MAP.keys(), key=len, reverse=True):
-        if re.search(r'\b' + re.escape(shortcut) + r'\b', query_lower):
-            full = MONTH_MAP[shortcut]
-            if full not in found:
-                found.append(full)
-    return found
+    """Every distinct month named, in the order the user actually wrote them.
+
+    Two fixes over the naive version:
+
+    * It iterated the month vocabulary longest-first and appended in THAT
+      order, so "compare march and january" came back ['January','March']
+      — the docstring said "first seen" but the output was sorted by
+      keyword length. On a two-period comparison this silently reversed
+      the periods in the answer.
+    * Bare "may" is far more often the modal verb than the month.
+      "what suggestions may improve availability" was being scoped to
+      May. It now only counts as a month next to a year, an adjacent
+      month, or a date-ish preposition.
+    """
+    hits: list[tuple[int, str]] = []
+    for token in sorted(MONTH_MAP.keys(), key=len, reverse=True):
+        for m in re.finditer(r'\b' + re.escape(token) + r'\b', query_lower):
+            if token == "may" and not _may_is_a_month(query_lower, m.start(), m.end()):
+                continue
+            # Skip a short form already covered by a longer match here
+            # ("jan" inside "january").
+            if any(s <= m.start() < e for s, e in
+                   [(h[0], h[0] + len(h[1])) for h in hits]):
+                continue
+            hits.append((m.start(), MONTH_MAP[token]))
+
+    out: list[str] = []
+    for _, month in sorted(hits, key=lambda t: t[0]):
+        if month not in out:
+            out.append(month)
+    return out
+
+
+_MAY_MONTH_CONTEXT = re.compile(
+    r'(?:\bin\s+may\b|\bof\s+may\b|\bmay\s+20\d{2}\b|\bsince\s+may\b|'
+    r'\bmay\s+and\b|\band\s+may\b|\bmay\s+to\b|\bto\s+may\b|'
+    r'\b(?:1st|2nd|3rd|4th|5th)\s+week\s+(?:of\s+)?may\b)'
+)
+
+
+def _may_is_a_month(query_lower: str, start: int, end: int) -> bool:
+    """"May" counts as the month only in unambiguously date-like phrasing."""
+    return bool(_MAY_MONTH_CONTEXT.search(query_lower))
 
 def extract_all_years(query_lower: str) -> list[str]:
     """Return every distinct 4-digit year mentioned, in order first seen."""
@@ -749,3 +784,13 @@ def build_intent_badge(query_intent, active_product, periods, active_crop=None, 
     if category_filter == PRODUCT_QUERY_CATEGORY:
         return "💰 Product Inquiries"
     return "🌾 Sentiment Overview"
+
+def _explicit_list_format(query_lower: str) -> bool:
+    """True when the user explicitly asked for a list/bullets."""
+    return bool(re.search(r'\blist(ed|ing)?\b|\bbullets?\b|\bbullet\s*points?\b', query_lower))
+
+
+def _wants_products_only(query_lower: str) -> bool:
+    """True when the question is specifically about products, so the model
+    must be told not to present diseases or pests as if they were products."""
+    return bool(re.search(r'\bproducts?\b', query_lower))

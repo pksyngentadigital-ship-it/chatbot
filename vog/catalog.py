@@ -459,3 +459,59 @@ _MONTH_RE = re.compile(
 _WEEK_COL_RE = re.compile(r'^w(?:ee)?k(?:\s*(?:no\.?|number|#))?$', re.IGNORECASE)
 
 PRODUCT_STOPWORDS |= GENERIC_CAPITALIZED_STOPWORDS
+
+
+# ── Intent vocabulary ──
+# Lifted out of process_chat_query, where they were local variables
+# rebuilt on every single request.
+
+TOPIC_KEYWORDS = [
+    "talking about", "talking most about", "talking the most about",
+    "most discussed", "most talked about", "common themes",
+    "main themes", "what topics", "which topics", "trending topics",
+    "top topics", "hot topics", "being discussed", "being talked about",
+    "conversation topics", "main subjects", "most common subjects",
+]
+
+COMPLAINT_KEYWORDS = [
+    "complaint", "complaints", "negative feedback",
+    "negative", "issues", "problems", "concerns",
+    "issue", "problem", "root cause", "root causes",
+    # expanded — real phrasings that don't literally say "complaint"/"issue"
+    "dissatisfied", "unhappy", "frustration", "frustrated",
+    "unavailability", "shortage", "shortages", "delay", "delays",
+    "delayed", "defect", "defects", "faulty", "damaged", "not working",
+    "poor quality", "low quality", "bad experience", "disappointed",
+    "difficulty", "difficulties", "trouble", "troubles",
+    "pain point", "pain points", "grievance", "grievances",
+]
+
+POSITIVE_KEYWORDS = [
+    "positive feedback", "appreciation", "praise",
+    "favorable", "satisfied",
+    # expanded
+    "happy", "pleased", "impressed", "love", "loved", "loving",
+    "great experience", "good experience", "worked well", "works well",
+    "effective", "satisfaction", "delighted", "thrilled",
+]
+
+SUGGESTION_KEYWORDS = [
+    "suggestion", "suggestions", "recommend", "recommendation",
+    "recommendations", "improvement", "improvements",
+    "expectation", "expectations",
+    # expanded
+    "would like", "wish", "wishes", "hope for", "hoping for",
+    "request", "requests", "requested", "ask for", "asking for",
+    "want to see", "should add", "should include", "feature request",
+    "enhancement", "enhancements", "could improve",
+]
+
+SENTIMENT_KEYWORDS = [
+    "sentiment", "sentiments", "overall", "general",
+    "overview", "analysis", "summary", "both",
+    "feedback", "feedbacks",
+    # expanded — general "what do people think" style asks
+    "think", "thoughts", "opinion", "opinions", "views",
+    "perception", "perceptions", "reaction", "reactions",
+    "impression", "impressions", "experience", "experiences",
+]
