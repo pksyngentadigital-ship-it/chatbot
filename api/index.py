@@ -29,7 +29,12 @@ from vog.plan import MODE_REPLY, build_plan
 MAX_QUERY_CHARS = 500
 MAX_CONTEXT_CHARS = 4000
 
-app = FastAPI(title="Voice of Grower", docs_url=None, redoc_url=None)
+# No rewrites in vercel.json on purpose. Vercel's fastapi preset already
+# routes every non-static request here with its original path; adding a
+# rewrite made the app receive the literal destination ("/api/index")
+# instead, so every route 404'd while /openapi.json still worked.
+app = FastAPI(title="Voice of Grower", docs_url=None, redoc_url=None,
+              openapi_url=None)
 
 PINECONE_API_KEY = os.getenv("PINECONE_API_KEY")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")

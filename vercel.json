@@ -3,10 +3,7 @@
   "functions": {
     "api/index.py": {
       "maxDuration": 60,
-      "excludeFiles": "{tests/**,scripts/**,templates/**,public/**,**/__pycache__/**,vog_core.py,main.py,app.py,shared_state.py,pytest.ini,Procfile}"
+      "excludeFiles": "{tests/**,scripts/**,public/**,**/__pycache__/**,app.py,pytest.ini}"
     }
-  },
-  "rewrites": [
-    { "source": "/api/(.*)", "destination": "/api/index" }
-  ]
+  }
 }
