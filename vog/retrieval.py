@@ -60,11 +60,13 @@ class Evidence:
         return sum(s.total for s in self.segments)
 
 
-def open_index(api_key: str):
+def connect(api_key: str):
+    """Returns (client, index): the client embeds, the index queries."""
     # Imported lazily so this module stays importable (and testable) without
     # the SDK, and so a cold start pays for it only when a query arrives.
     from pinecone import Pinecone
-    return Pinecone(api_key=api_key).Index(PINECONE_INDEX_NAME)
+    pc = Pinecone(api_key=api_key)
+    return pc, pc.Index(PINECONE_INDEX_NAME)
 
 
 def dataset_extent(index) -> tuple[str, str] | None:

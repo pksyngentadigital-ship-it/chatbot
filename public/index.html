@@ -1,0 +1,85 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Voice of Grower</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E%F0%9F%8C%BE%3C/text%3E%3C/svg%3E">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;650;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/static/style.css">
+  <script src="/static/vendor/chart.umd.min.js"></script>
+  <script src="/static/vendor/marked.min.js"></script>
+  <script src="/static/vendor/purify.min.js"></script>
+</head>
+<body>
+  <div class="app" id="app">
+    <div class="sidebar-scrim" id="sidebar-scrim"></div>
+    <aside class="sidebar" id="sidebar">
+      <a href="/" class="wordmark"><span class="wordmark-mark">🌾</span> Voice of Grower</a>
+
+      <button class="new-chat-btn" id="new-chat-btn" type="button">
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>
+        New chat
+      </button>
+
+      <div class="sidebar-spacer"></div>
+
+    </aside>
+
+    <div class="main-col">
+      <header class="mobile-topbar">
+        <button id="sidebar-toggle" class="icon-btn" aria-label="Open menu" type="button">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="3" y1="6" x2="21" y2="6"></line><line x1="3" y1="12" x2="21" y2="12"></line><line x1="3" y1="18" x2="21" y2="18"></line></svg>
+        </button>
+        <span class="wordmark small"><span class="wordmark-mark">🌾</span> Voice of Grower</span>
+      </header>
+
+      <div class="scroll-area" id="scroll-area">
+        <div class="content-col">
+          <section id="welcome" class="welcome">
+            <div class="welcome-mark">🌾</div>
+            <h1>Voice of Grower</h1>
+            <p class="welcome-sub">Ask about sentiment, complaints, products, crops, or trends — grounded entirely in your grower feedback data.</p>
+
+            <div class="suggestions" id="suggestions-box">
+              <!-- Static copy, deliberately: the page is served straight from
+                   the CDN, and waking a Python function just to render six
+                   buttons would put a cold start in front of every visit. -->
+              <div class="prompt-grid">
+                <button class="prompt-card" type="button">What are the top 10 grower concerns reported during the last 30 days?</button>
+                <button class="prompt-card" type="button">Which Syngenta products received the highest positive feedback?</button>
+                <button class="prompt-card" type="button">Show overall grower sentiment by month.</button>
+                <button class="prompt-card" type="button">What are the most common product improvement recommendations?</button>
+                <button class="prompt-card" type="button">Which crop generated the highest number of complaints?</button>
+                <button class="prompt-card" type="button">Summarize the major grower insights for the last quarter in one page.</button>
+              </div>
+            </div>
+          </section>
+
+          <div id="chat-log" class="chat-log" role="log" aria-live="polite" aria-atomic="false"></div>
+        </div>
+      </div>
+
+      <div class="composer-wrap">
+        <div class="content-col">
+          <form id="chat-form" class="composer">
+            <label for="chat-input" class="sr-only">Message Voice of Grower</label>
+            <textarea id="chat-input" rows="1" autocomplete="off" maxlength="500" placeholder="Message Voice of Grower..."></textarea>
+            <button type="button" id="stop-btn" aria-label="Stop generating" hidden>
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="6" width="12" height="12" rx="2"></rect></svg>
+            </button>
+            <button type="submit" id="send-btn" aria-label="Send" disabled>
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="19" x2="12" y2="5"></line><polyline points="5 12 12 5 19 12"></polyline></svg>
+            </button>
+          </form>
+          <div class="composer-footnote">Voice of Grower can make mistakes. Answers are grounded in your ingested feedback data.</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>

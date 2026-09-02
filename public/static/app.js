@@ -18,6 +18,57 @@ function appendBadge(container, badgeText) {
   container.appendChild(span);
 }
 
+
+// ── Conversation memory lives in the browser ──────────────────────────
+// There is no server-side session: each request may land on a different
+// machine, so anything the server "remembered" would be remembered only
+// sometimes. Every read and write is guarded — private windows and
+// blocked site data make localStorage throw rather than return null.
+const STORE_KEY = "vog.history.v1";
+const CTX_KEY = "vog.context.v1";
+const MAX_TURNS = 40;
+
+function readJSON(key, fallback) {
+  try {
+    const raw = window.localStorage.getItem(key);
+    return raw ? JSON.parse(raw) : fallback;
+  } catch (e) {
+    return fallback;
+  }
+}
+
+function writeJSON(key, value) {
+  try {
+    window.localStorage.setItem(key, JSON.stringify(value));
+  } catch (e) {
+    // Quota exceeded or storage unavailable. The conversation on screen is
+    // unaffected; it just will not survive a reload.
+  }
+}
+
+function loadHistory() {
+  const history = readJSON(STORE_KEY, []);
+  return Array.isArray(history) ? history : [];
+}
+
+function appendTurn(entry) {
+  const history = loadHistory();
+  history.push(entry);
+  writeJSON(STORE_KEY, history.slice(-MAX_TURNS));
+}
+
+function loadContext() {
+  const ctx = readJSON(CTX_KEY, null);
+  return ctx && typeof ctx === "object" ? ctx : null;
+}
+
+function clearStored() {
+  try {
+    window.localStorage.removeItem(STORE_KEY);
+    window.localStorage.removeItem(CTX_KEY);
+  } catch (e) { /* nothing to clear */ }
+}
+
 function scrollToBottom() {
   const area = document.getElementById("scroll-area");
   if (area) area.scrollTo({ top: area.scrollHeight, behavior: "smooth" });
@@ -54,9 +105,7 @@ document.getElementById("new-chat-btn").addEventListener("click", () => {
   if (welcome) welcome.classList.remove("collapsed");
   closeSidebar();
   chatInputFocus();
-  // Fire-and-forget: clears server-side history + follow-up context for
-  // this session. Nothing in the UI depends on the response.
-  fetch("/chat/clear", { method: "POST" }).catch(() => {});
+  clearStored();
 });
 
 function chatInputFocus() {
@@ -154,21 +203,52 @@ function renderChart(container, chart) {
   });
 }
 
-function renderDownloads(container, downloadId) {
-  if (!downloadId) return;
+// Exports are regenerated per click rather than linked to: a serverless
+// function has no memory between invocations to have kept the bytes in.
+async function downloadExport(btn, kind, turn) {
+  const original = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = "Preparing...";
+  try {
+    const res = await fetch("/api/export", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        kind,
+        q: turn.query,
+        ctx: turn.sentContext ? JSON.stringify(turn.sentContext) : null,
+        answer_text: turn.content || "",
+      }),
+    });
+    if (!res.ok) throw new Error(String(res.status));
+    const blob = await res.blob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `voice-of-grower.${kind === "excel" ? "xlsx" : kind}`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+    btn.textContent = original;
+  } catch (e) {
+    btn.textContent = "Failed — retry";
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+function renderDownloads(container, turn) {
+  if (!turn || !turn.exportable) return;
   const wrap = document.createElement("div");
   wrap.className = "downloads";
-  const items = [
-    ["csv", "CSV"],
-    ["excel", "Excel"],
-    ["pptx", "PowerPoint"],
-  ];
-  items.forEach(([kind, label]) => {
-    const a = document.createElement("a");
-    a.className = "dl-btn";
-    a.href = `/download/${downloadId}/${kind}`;
-    a.textContent = `↓ ${label}`;
-    wrap.appendChild(a);
+  [["csv", "CSV"], ["excel", "Excel"], ["pptx", "PowerPoint"]].forEach(([kind, label]) => {
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "dl-btn";
+    btn.textContent = `↓ ${label}`;
+    btn.addEventListener("click", () => downloadExport(btn, kind, turn));
+    wrap.appendChild(btn);
   });
   container.appendChild(wrap);
 }
@@ -215,10 +295,14 @@ function sendQuery(query) {
   const assistantWrap = addAssistantMessage();
 
   let bodyText = "";
-  let headerText = "";
   let repaintQueued = false;
 
-  const es = new EventSource(`/chat?q=${encodeURIComponent(query)}`);
+  const sentContext = loadContext();
+  appendTurn({ role: "user", content: query });
+
+  let url = `/api/chat?q=${encodeURIComponent(query)}`;
+  if (sentContext) url += `&ctx=${encodeURIComponent(JSON.stringify(sentContext))}`;
+  const es = new EventSource(url);
   inFlight = es;
   setBusy(true);
 
@@ -230,7 +314,6 @@ function sendQuery(query) {
 
   es.addEventListener("start", (e) => {
     const data = JSON.parse(e.data);
-    headerText = data.header || "";
     assistantWrap.innerHTML = "";
     appendBadge(assistantWrap, data.badge);
     const body = document.createElement("div");
@@ -249,7 +332,7 @@ function sendQuery(query) {
       repaintQueued = false;
       const body = assistantWrap.querySelector(".msg-body");
       if (body) {
-        setMarkdown(body, headerText + bodyText);
+        setMarkdown(body, bodyText);
         body.insertAdjacentHTML("beforeend", '<span class="cursor-blink"></span>');
       }
       scrollToBottom();
@@ -263,12 +346,25 @@ function sendQuery(query) {
 
     const body = document.createElement("div");
     body.className = "msg-body";
-    setMarkdown(body, data.kind === "normal" ? (data.header || "") + data.reply : data.reply);
+    setMarkdown(body, data.reply);
     assistantWrap.appendChild(body);
 
+    const turn = {
+      role: "assistant",
+      content: data.reply,
+      badge: data.badge,
+      chart: data.chart,
+      suggestions: data.suggestions,
+      exportable: data.exportable,
+      query,
+      sentContext,
+    };
     renderChart(assistantWrap, data.chart);
-    renderDownloads(assistantWrap, data.download_id);
+    renderDownloads(assistantWrap, turn);
     renderSuggestions(assistantWrap, data.suggestions);
+
+    appendTurn(turn);
+    if (data.context) writeJSON(CTX_KEY, data.context);
 
     scrollToBottom();
     finish();
@@ -330,20 +426,11 @@ document.getElementById("chat-form").addEventListener("submit", (e) => {
 const stopBtnEl = document.getElementById("stop-btn");
 if (stopBtnEl) stopBtnEl.addEventListener("click", stopStreaming);
 
-// ── Restore server-side chat history on page load, so a refresh doesn't
-// lose the conversation. Reuses the same render helpers as live turns. ──
+// ── Restore the conversation on load, so a refresh doesn't lose it.
+// Reuses the same render helpers as live turns. ──
 (function hydrateHistory() {
-  let history = [];
-  try {
-    // Read from a JSON data island rather than an inline assignment — in
-    // application/json the parser only looks for "</script", so stored
-    // text cannot confuse the tokenizer and break the page.
-    const el = document.getElementById("init-history");
-    if (el) history = JSON.parse(el.textContent || "[]");
-  } catch (e) {
-    history = [];
-  }
-  if (!Array.isArray(history) || history.length === 0) return;
+  const history = loadHistory();
+  if (history.length === 0) return;
 
   collapseWelcome();
   const log = document.getElementById("chat-log");
@@ -368,7 +455,7 @@ if (stopBtnEl) stopBtnEl.addEventListener("click", stopStreaming);
     setMarkdown(body, entry.content || "");
     wrap.appendChild(body);
     renderChart(wrap, entry.chart);
-    renderDownloads(wrap, entry.download_id);
+    renderDownloads(wrap, entry);
     renderSuggestions(wrap, entry.suggestions);
     log.appendChild(wrap);
   });

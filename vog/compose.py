@@ -8,6 +8,7 @@ as narration material. The model never produces a number.
 from dataclasses import dataclass, field
 
 from vog import exports
+from vog import llm
 from vog import parsing as P
 from vog.catalog import DEFAULT_TIMEFRAME_LABEL
 from vog.plan import MODE_RANK, MODE_REPLY, MODE_TREND, QueryPlan
@@ -27,6 +28,7 @@ class Answer:
     export_rows: list[dict] = field(default_factory=list)
     export_meta: dict = field(default_factory=dict)
     context: dict = field(default_factory=dict)
+    top: tuple[str, int] | None = None   # headline result, for narration
 
 
 def compose(plan: QueryPlan, evidence: Evidence) -> Answer:
@@ -81,7 +83,7 @@ def _rank(plan: QueryPlan, ev: Evidence) -> Answer:
     )
     rows = [{plan.rank_dimension.title(): n, "Mentions": c} for n, c in ranking]
     return Answer(
-        kind="ranking", badge=badge, header=header, text=text,
+        kind="ranking", badge=badge, header=header, text=text, top=(top_name, top_count),
         chart={"type": "bar", "title": f"{plan.rank_dimension.title()} Mentions",
                "labels": [n for n, _ in ranking], "values": [c for _, c in ranking]}
         if plan.output_format == "chart" else None,
@@ -120,7 +122,7 @@ def _trend(plan: QueryPlan, ev: Evidence) -> Answer:
             f"Lowest month: **{low[0]}** ({low[1]} records).\n\n" + "\n".join(table))
     rows = [{"Month": l, "Count": c, "MoM Growth %": g} for (l, c), g in zip(monthly, growth)]
     return Answer(
-        kind="trend", badge="📈 Monthly Trend", header=header, text=text,
+        kind="trend", badge="📈 Monthly Trend", header=header, text=text, top=(high[0], high[1]),
         chart={"type": "line", "title": "Monthly Trend",
                "labels": [l for l, _ in monthly], "values": [c for _, c in monthly]}
         if plan.output_format == "chart" else None,
@@ -258,3 +260,45 @@ def build_exports(answer: Answer, summary_text: str = "") -> dict:
             table_rows=meta.get("table_rows"),
         ),
     }
+
+
+# ───────────────────────── optional LLM garnish ──────────────────────
+# Both of these run after the answer is already complete and valid, and
+# both return empty on any failure — a broken garnish call must never
+# break or delay the answer itself.
+
+def suggest_followups(plan: QueryPlan, answer_text: str, api_key: str, n: int = 3) -> list[str]:
+    """Propose follow-up QUESTIONS. Nothing to hallucinate here: these are
+    prompts for the user, not asserted facts."""
+    subject = plan.subject_label
+    parsed = llm.complete_json(
+        "Return only a JSON array of short question strings. No markdown, no numbering.",
+        (f"A user asked about {plan.intent} feedback"
+         f"{f' about {subject}' if subject else ''} and got this answer:\n\n"
+         f"{answer_text[:2000]}\n\n"
+         f"Suggest exactly {n} short, genuinely different follow-up questions about this "
+         f"grower-feedback dataset — a different crop, product, timeframe or angle, not a "
+         f"rephrasing of the same question."),
+        api_key, max_tokens=300,
+    )
+    if not isinstance(parsed, list):
+        return []
+    return [str(s).strip() for s in parsed if str(s).strip()][:n]
+
+
+def narrate_result(dimension: str, top_name: str, top_count: int,
+                   bullets: list[str], api_key: str) -> str:
+    """A couple of sentences of colour on an already-locked ranking or
+    trend. It runs after the numbers are final, so it can add narrative
+    but never change a rank or a count."""
+    if not bullets:
+        return ""
+    return llm.complete(
+        "You are a data analyst. Use ONLY the feedback bullets below — never invent or "
+        "add any detail not explicitly present. Write 2-3 sentences on the likely reason "
+        "behind this result. If the bullets don't clearly explain why, say plainly that "
+        "the data doesn't make the reason clear instead of guessing.",
+        f"Top result — {dimension}: {top_name} ({top_count} mentions)\n\nFeedback bullets:\n"
+        + "\n".join(f"- {b}" for b in bullets[:8]),
+        api_key, max_tokens=250,
+    )
