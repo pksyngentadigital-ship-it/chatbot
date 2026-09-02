@@ -8,6 +8,10 @@ the two never disagree about what a question means.
 import hmac
 import os
 
+# pandas is not in requirements.txt — that file is the Vercel function's
+# dependency set, where pandas was 63MB of a 250MB budget, and CI now
+# rejects it there. It is safe to import here regardless: streamlit hard-
+# depends on pandas, and this module only ever runs under streamlit.
 import pandas as pd
 import streamlit as st
 from dotenv import load_dotenv
