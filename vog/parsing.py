@@ -794,3 +794,230 @@ def _wants_products_only(query_lower: str) -> bool:
     """True when the question is specifically about products, so the model
     must be told not to present diseases or pests as if they were products."""
     return bool(re.search(r'\bproducts?\b', query_lower))
+
+
+def build_system_prompt(query_intent, timeframe_label, explicit_list_format, active_product, periods, active_crop=None, output_format=None, wants_products_only=False, avoid_repeat_text=None, comparison_axis="time"):
+    """ Unified prompt builder. Preserves the original prose behaviour (including the two-paragraph favorable/complaints structure for the default sentiment case) while adding: real markdown bullet formatting when the user explicitly asks to "list" something, strict single-product/crop focus, explicit period-by-period comparison instructions, and output-format overrides (table / executive summary / PPT outline). """
+    product_label = active_product.title() if active_product else None
+    crop_label = active_crop.title() if active_crop else None
+
+    if active_product and active_crop:
+        product_clause = (
+            f"Focus EXCLUSIVELY on the product '{product_label}' as it relates to the "
+            f"crop '{crop_label}'. Do NOT mention any other product or crop, even if "
+            f"they appear in the data context.\n"
+        )
+    elif active_product:
+        product_clause = (
+            f"Focus EXCLUSIVELY on the product '{product_label}'. Do NOT mention, "
+            f"reference, or summarize information about any other product, even if "
+            f"other products appear in the data context — ignore anything not about "
+            f"'{product_label}'.\n"
+        )
+    elif active_crop:
+        product_clause = (
+            f"Focus EXCLUSIVELY on the crop '{crop_label}'. Do NOT mention, reference, "
+            f"or summarize information about any other crop, even if other crops appear "
+            f"in the data context — ignore anything not about '{crop_label}'. Still name "
+            f"every product mentioned in connection with '{crop_label}'.\n"
+        )
+    else:
+        product_clause = (
+            "Explicitly name every product mentioned in the data context along with "
+            "the exact reason for the feedback.\n"
+        )
+
+    comparison_clause = ""
+    if periods:
+        period_names = ", ".join(p[0] for p in periods)
+        first = period_names.split(', ')[0]
+        if comparison_axis == "subject":
+            # Comparing products/crops against each other, not time periods.
+            comparison_clause = (
+                f"This is a side-by-side COMPARISON of: {period_names}. "
+                f"The data context below is divided into one clearly labeled section per "
+                f"item. Compare them directly against each other — say which is better "
+                f"received and in what respect, and call out where they differ. Refer to "
+                f"each by its exact name, and cover EVERY one of them: do not answer about "
+                f"only one. If the data context for one of them is empty, say plainly that "
+                f"there is no feedback for it rather than omitting it silently. "
+                f"End with a one-sentence bottom line, e.g. 'Overall {first} is better "
+                f"regarded for <reason>.'\n"
+            )
+        else:
+            comparison_clause = (
+                f"This is a COMPARISON request across these periods: {period_names}. "
+                f"The data context below is divided into clearly labeled sections, one per "
+                f"period. Explicitly compare the periods against each other — call out what "
+                f"increased, decreased, improved, worsened, or stayed roughly the same. "
+                f"Refer to each period by its exact name. "
+                f"CRITICAL: for every point you make, name the specific product it is about "
+                f"(never speak only in generic sentences with no product named), and for each "
+                f"period state plainly whether that product's feedback was positive/satisfactory "
+                f"or negative/unsatisfactory in that period — e.g. 'In {first}, "
+                f"growers were satisfied with <Product>, but in the other period they were not.' "
+                f"Do this for every product that appears in the data context.\n"
+            )
+
+    intent_label = {
+        "complaint":  "complaints and concerns (including root-cause issues)",
+        "positive":   "positive feedback and appreciation",
+        "suggestion": "grower suggestions and improvement recommendations",
+        "sentiment":  "overall sentiment (both positive and negative)",
+        "topics":     "the most frequently discussed topics and themes",
+    }[query_intent]
+
+    opening_hint = {
+        "complaint":  f"e.g. 'Here are the complaints for {timeframe_label}:'",
+        "positive":   f"e.g. 'The positive feedback for {timeframe_label} looks great!'",
+        "suggestion": f"e.g. 'Here are the grower suggestions for {timeframe_label}:'",
+        "sentiment":  f"e.g. 'Here is the sentiment overview for {timeframe_label}:'",
+        "topics":     f"e.g. 'Here's what growers are talking about most for {timeframe_label}:'",
+    }[query_intent]
+    subject_label = build_subject_label(active_product, active_crop)
+    if subject_label:
+        opening_hint = f"e.g. 'Here's what growers are saying about {subject_label}:'"
+
+    output_format_clause = ""
+    if output_format == "table":
+        output_format_clause = (
+            "OUTPUT FORMAT OVERRIDE: Format your ENTIRE response as a markdown table "
+            "with columns '| Category | Feedback |'. One data point per row. No prose "
+            "outside the table.\n"
+        )
+    elif output_format == "exec_summary":
+        output_format_clause = (
+            "OUTPUT FORMAT OVERRIDE: Write a one-page executive summary with these "
+            "bold section headers on their own lines, in order: '*Headline:*' (one "
+            "sentence takeaway), '*Key Insights:*' (3-5 bullet points, one specific "
+            "point each), '*Recommendation:*' (1-2 sentences on what to do next).\n"
+        )
+    elif output_format == "ppt":
+        output_format_clause = (
+            "OUTPUT FORMAT OVERRIDE: Format your response as a PowerPoint-ready slide "
+            "outline. Use '*Slide 1: <short title>*' on its own line, followed by "
+            "3-5 short bullet points (each starting with '- '), then a blank line "
+            "before the next slide if more than one slide is warranted. Keep every "
+            "bullet short enough to fit on a slide (under 15 words).\n"
+        )
+
+    if explicit_list_format:
+        format_clause = (
+            "Format your ENTIRE response as a real markdown bullet list. Every single "
+            "bullet MUST start on its own new line with a dash and a space: '- '. "
+            "Never write '•' and never put more than one bullet on the same line. "
+            "Each bullet must be one specific, concrete point (one product/issue per "
+            "bullet) — no paragraphs, no prose outside the list.\n"
+        )
+        if query_intent == "sentiment" and not periods:
+            format_clause += (
+                "Group the bullets under two bold headers on their own lines: "
+                "'*Positive:*' followed by positive bullets, then a blank line, then "
+                "'*Negative:*' followed by negative bullets.\n"
+            )
+        if periods:
+            format_clause += (
+                "Group the bullets under one bold header per period (using the exact "
+                "period names given above, each on its own line), followed by that "
+                "period's bullets, with a blank line between groups.\n"
+            )
+        structure_clause = ""
+    else:
+        format_clause = (
+            "Respond in natural, flowing prose — no bullet points, no markdown lists, "
+            "no asterisks. Sound like a helpful chatbot, not a formal report. Keep it "
+            "concise.\n"
+        )
+        if query_intent == "sentiment" and not periods and not active_product:
+            structure_clause = (
+                "Structure your response in exactly two short paragraphs:\n"
+                "Paragraph 1 — Favorable Sentiments: summarize positive trends.\n"
+                "Paragraph 2 — Complaints & Concerns: summarize issues.\n"
+                "Each paragraph should be 3-5 sentences max.\n"
+            )
+        elif query_intent == "topics":
+            structure_clause = (
+                "Structure your response as one short paragraph per topic (3-6 "
+                "topics total, most-discussed first), each naming the topic and "
+                "summarizing what's said about it in 1-2 sentences.\n"
+            )
+        else:
+            structure_clause = "Keep the response to 4-6 sentences max.\n"
+
+    topics_clause = ""
+    if query_intent == "topics":
+        topics_clause = (
+            "This is a TOPICS/THEMES request, not a sentiment request: identify "
+            "the 3-6 most frequently occurring topics or themes in the data "
+            "context below (e.g. pricing, product performance, packaging, "
+            "availability, application timing) and briefly describe what "
+            "growers are saying about each one. Do NOT frame this as "
+            "positive-vs-negative sentiment analysis — focus on WHAT is being "
+            "discussed, not whether it is good or bad. Order topics from most "
+            "to least frequently mentioned where you can tell.\n"
+        )
+
+    # An explicit output-format request (table / exec summary / PPT outline)
+    # always wins over the default bullet/prose formatting instructions.
+    if output_format_clause:
+        format_clause = output_format_clause
+        structure_clause = ""
+
+    system_prompt = (
+        "You are a smart, friendly chatbot analyst for Syngenta, an agriculture company. "
+        "STRICT GROUNDING RULE — READ CAREFULLY: You must use ONLY the information given "
+        "to you in the 'Data Context' block in the user's message. You have general "
+        "knowledge about real Syngenta/agriculture products from your training — you must "
+        "IGNORE all of that here. Do NOT invent, assume, guess, or add any product name, "
+        "complaint, statistic, or feedback point that is not explicitly written in the Data "
+        "Context, even if it sounds plausible or matches a real product you know about. If "
+        "the Data Context contains only one point, your entire response must be based on "
+        "that single point only — never pad the list with extra products or details to make "
+        "it look longer or more complete. If the Data Context is empty or has nothing "
+        "relevant, say so plainly instead of making something up. "
+        f"Cover ONLY {intent_label} from the data context provided. "
+        f"{product_clause}"
+        + (
+            "The user is asking specifically about PRODUCTS. Only name real "
+            "Syngenta product/brand names (e.g. Isabion, Axial, Quantis, "
+            "Cropwise). Do NOT list crop diseases, pests, weeds, or agronomic "
+            "problems (e.g. Septoria, Blast, Armyworm, termites, weeds, "
+            "yellowing) as if they were products — mention a disease/pest "
+            "only in passing if it explains why a product was used, never as "
+            "an item in a products list.\n"
+            if wants_products_only else ""
+        )
+        + f"{comparison_clause}"
+        f"{topics_clause}"
+        f"{format_clause}"
+        f"{structure_clause}"
+        "ANSWER THE QUESTION THAT WAS ASKED. The user's exact question is at "
+        "the end of the message below. Address that specific question first "
+        "and directly — if they asked about price, lead with price; if they "
+        "asked about packaging, lead with packaging; if they asked whether "
+        "something improved, say whether it improved. Do NOT substitute a "
+        "general overview of the subject for an answer to the question. If "
+        "the Data Context genuinely does not address what they asked, say so "
+        "in one plain sentence and then give the closest relevant information "
+        "you do have, clearly labelled as such. "
+        f"Start your response with a short, clear opening line ({opening_hint}), then "
+        "continue. Write so a busy reader understands the key takeaway at first glance. "
+        "Do not include bracketed dates, week labels, or raw metadata tags in the output. "
+        "REMINDER: every product name and every point in your response must come directly "
+        "from the Data Context above — never introduce a product or detail that isn't "
+        "explicitly there."
+    )
+
+    if avoid_repeat_text:
+        system_prompt += (
+            "\n\nCONTINUATION REQUEST: The user already received the response below "
+            "earlier in this conversation and is now explicitly asking for MORE or "
+            "DIFFERENT points on the same subject — not a repeat. Do not restate any "
+            "point from it in substantially the same words. Pull NEW points from the "
+            "Data Context that weren't already covered. If nothing further is "
+            "supported by the Data Context, say plainly that there isn't anything "
+            "further to add rather than repeating the earlier points.\n\n"
+            f"Previous response already given:\n{avoid_repeat_text}"
+        )
+
+    return system_prompt
