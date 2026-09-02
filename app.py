@@ -14,7 +14,7 @@ load_dotenv()
 GROQ_API_KEY = os.getenv("GROQ_API_KEY") or st.secrets.get("GROQ_API_KEY", None)
 PINECONE_API_KEY = os.getenv("PINECONE_API_KEY") or st.secrets.get("PINECONE_API_KEY", None)
 
-st.set_page_config(page_title="Weekly Sentiment RAG Engine", page_icon="🌾", layout="wide")
+st.set_page_config(page_title="Voice of Grower", page_icon="🌾", layout="wide")
 
 if "authenticated" not in st.session_state:
     st.session_state.authenticated = False
