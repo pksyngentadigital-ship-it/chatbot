@@ -22,4 +22,4 @@ jobs:
         with:
           python-version: "3.12"
       - name: Probe the live chat endpoint
-        run: python scripts/heartbeat.py --url "${{ vars.APP_URL || 'https://voice-of-grower.onrender.com' }}"
+        run: python scripts/heartbeat.py --url "${{ vars.APP_URL || 'https://voice-of-grower.vercel.app' }}"

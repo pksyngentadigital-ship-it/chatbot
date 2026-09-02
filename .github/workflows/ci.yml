@@ -1,8 +1,8 @@
 name: CI
 
-# Runs the suite on every push and PR. Previously the tests only ran when
-# someone remembered to run them locally, so nothing stopped a regression
-# from reaching production — Render deploys straight off main.
+# Runs the suite on every push and PR. Without it the tests only ran when
+# someone remembered to, so nothing stopped a regression reaching
+# production — Vercel deploys straight off main.
 on:
   push:
     branches: [main]
@@ -28,30 +28,23 @@ jobs:
           pip install -r requirements.txt
           pip install pytest
 
-      - name: Verify the app imports
+      - name: Verify the serverless entrypoint imports
         env:
           GROQ_API_KEY: dummy
           PINECONE_API_KEY: dummy
-          ADMIN_PASSWORD: dummy-ci-password
-          SESSION_SECRET: dummy-ci-session-secret-not-used-anywhere
-        run: python -c "import main, vog_core, shared_state; print('imports OK')"
+        run: |
+          python -c "
+          import importlib.util, sys
+          spec = importlib.util.spec_from_file_location('vog_api', 'api/index.py')
+          mod = importlib.util.module_from_spec(spec)
+          spec.loader.exec_module(mod)
+          routes = sorted(r.path for r in mod.app.routes if hasattr(r, 'path'))
+          assert '/api/chat' in routes and '/api/export' in routes, routes
+          print('entrypoint OK:', routes)
+          "
 
       - name: Run tests
         run: python -m pytest -q
-
-      - name: Check templates render
-        run: |
-          python - <<'PY'
-          from jinja2 import Environment, FileSystemLoader
-          env = Environment(loader=FileSystemLoader("templates"))
-          env.get_template("chat.html").render(
-              suggested_prompts=["a"], app_build="ci", history_json="[]")
-          for auth in (True, False):
-              env.get_template("admin.html").render(
-                  authenticated=auth, error=None, app_build="ci",
-                  admin_enabled=True, feedback_log=[], feedback_durable=False)
-          print("templates OK")
-          PY
 
       - name: Guard against reintroduced credential defaults
         run: |
@@ -60,3 +53,13 @@ jobs:
             exit 1
           fi
           echo "no hardcoded credential defaults"
+
+      - name: Guard the function bundle against heavy dependencies
+        run: |
+          # pandas alone was 63MB of a 250MB budget, and every one of these
+          # is imported on a cold start.
+          if grep -qiE '^(pandas|streamlit|torch|scikit-learn|matplotlib|numpy)\b' requirements.txt; then
+            echo "::error::A heavy dependency was added to the Vercel function's requirements.txt."
+            exit 1
+          fi
+          echo "requirements.txt is lean"
