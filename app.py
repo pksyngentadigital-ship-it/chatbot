@@ -8,7 +8,7 @@ import vog_core
 
 # ── APP BUILD MARKER ── (bump this string whenever the file is regenerated,
 # so it's easy to confirm in the sidebar/logs which version is deployed)
-APP_BUILD = "2026-07-15-v12 (refactored onto vog_core.py — shared logic for a future non-Streamlit UI)"
+APP_BUILD = "2026-09-02-v13 (primary deployment: conversation memory, follow-up chips, curated prompts)"
 
 load_dotenv()
 GROQ_API_KEY = os.getenv("GROQ_API_KEY") or st.secrets.get("GROQ_API_KEY", None)
@@ -20,6 +20,13 @@ if "authenticated" not in st.session_state:
     st.session_state.authenticated = False
 if "chat_history" not in st.session_state:
     st.session_state.chat_history = []
+# Follow-up context, so "what about wheat?" resolves against the previous
+# turn. This app previously passed nothing, so every question was treated
+# as the first one and continuation phrases silently lost their subject.
+if "prior_context" not in st.session_state:
+    st.session_state.prior_context = None
+if "followups" not in st.session_state:
+    st.session_state.followups = []
 
 # ==========================================
 # UI STYLING (cosmetic only — agriculture theme)
@@ -157,25 +164,39 @@ def render_downloads(downloads: dict | None, key_prefix: str):
 # ==========================================
 # PUBLIC CHAT INTERFACE
 # ==========================================
-st.markdown('<div class="hero-title">🌾 Strategic Enterprise Performance Analyzer 🌱</div>', unsafe_allow_html=True)
+st.markdown('<div class="hero-title">🌾 Voice of Grower</div>', unsafe_allow_html=True)
 st.markdown(
-    '<div class="hero-subtitle">Ask about sentiment 🌾, complaints 🐛, positive feedback 🌻, a specific '
-    'product 🏷️, or compare weeks / months / years 🔀.</div>',
+    '<div class="hero-subtitle">Ask about sentiment, complaints, products, crops, or trends — '
+    'grounded entirely in your grower feedback data.</div>',
     unsafe_allow_html=True
 )
 
-with st.expander("💡 Not sure what to ask? Try one of these", expanded=(len(st.session_state.chat_history) == 0)):
-    tabs = st.tabs(list(vog_core.SUGGESTED_PROMPTS.keys()))
-    for tab, (category, prompts) in zip(tabs, vog_core.SUGGESTED_PROMPTS.items()):
-        with tab:
-            for i, prompt in enumerate(prompts):
-                if st.button(prompt, key=f"suggest_{category}_{i}", use_container_width=True):
-                    st.session_state.pending_query = prompt
-                    st.rerun()
+# A short curated set rather than the full 10-category grid — the grid was
+# cluttered enough to be harder to scan than helpful.
+if not st.session_state.chat_history:
+    st.caption("Not sure what to ask? Try one of these:")
+    cols = st.columns(2)
+    for i, prompt in enumerate(vog_core.SUGGESTED_PROMPTS_QUICK):
+        with cols[i % 2]:
+            if st.button(prompt, key=f"suggest_{i}", use_container_width=True):
+                st.session_state.pending_query = prompt
+                st.rerun()
+
+if st.session_state.chat_history:
+    if st.button("🔄 New chat"):
+        st.session_state.chat_history = []
+        st.session_state.prior_context = None
+        st.session_state.followups = []
+        st.rerun()
 
 for message in st.session_state.chat_history:
     with st.chat_message(message["role"]):
-        st.markdown(message["content"], unsafe_allow_html=True)
+        # Only the badge we construct is trusted HTML. Model output and
+        # data-derived text render as plain markdown, so a script tag in an
+        # ingested spreadsheet cell cannot execute here.
+        if message.get("badge_html"):
+            st.markdown(message["badge_html"], unsafe_allow_html=True)
+        st.markdown(message["content"])
 
 typed_query = st.chat_input("Ask about sentiment, a product, or compare periods...")
 user_query = typed_query or st.session_state.pop("pending_query", None)
@@ -184,11 +205,17 @@ if user_query and user_query.strip():
     with st.chat_message("user"):
         st.markdown(user_query)
     st.session_state.chat_history.append({"role": "user", "content": user_query})
+    st.session_state.followups = []
 
     with st.spinner("Searching and aggregating matching historical data records..."):
-        state = vog_core.process_chat_query(user_query, PINECONE_API_KEY, GROQ_API_KEY)
+        state = vog_core.process_chat_query(
+            user_query, PINECONE_API_KEY, GROQ_API_KEY,
+            prior_context=st.session_state.prior_context,
+        )
 
     kind = state["kind"]
+    if "context" in state:
+        st.session_state.prior_context = state["context"]
 
     # "capability" and "meta_feedback" are reply-only kinds like the rest of
     # this branch — they carry no badge/header/system_prompt, so letting them
@@ -196,17 +223,19 @@ if user_query and user_query.strip():
     if kind in ("blocked", "no_key", "no_data", "capability", "meta_feedback"):
         reply = state["reply"]
         with st.chat_message("assistant"):
-            st.markdown(reply, unsafe_allow_html=True)
+            st.markdown(reply)
         st.session_state.chat_history.append({"role": "assistant", "content": reply})
 
     elif kind in ("ranking", "trend"):
         badge = badge_html(state["badge"])
-        reply = f"{badge}\n\n{state['reply']}"
         with st.chat_message("assistant"):
-            st.markdown(reply, unsafe_allow_html=True)
+            st.markdown(badge, unsafe_allow_html=True)
+            st.markdown(state["reply"])
             render_chart(state.get("chart"))
             render_downloads(state.get("downloads"), key_prefix=kind)
-        st.session_state.chat_history.append({"role": "assistant", "content": reply})
+        st.session_state.chat_history.append(
+            {"role": "assistant", "content": state["reply"], "badge_html": badge}
+        )
 
     else:  # kind == "normal" — stream the LLM response ourselves
         badge = badge_html(state["badge"])
@@ -215,6 +244,7 @@ if user_query and user_query.strip():
             st.markdown(badge, unsafe_allow_html=True)
             stream_box = st.empty()
             full_response = ""
+            llm_failed = False
             try:
                 stream = vog_core.call_groq(
                     state["system_prompt"], state["user_prompt"], GROQ_API_KEY,
@@ -225,12 +255,41 @@ if user_query and user_query.strip():
                     full_response += token
                     stream_box.markdown(header + full_response + "▌")
                 stream_box.markdown(header + full_response)
-            except Exception as e:
-                full_response = f"Operational Processing Error: {e}"
-                stream_box.markdown(header + full_response)
+            except Exception:
+                llm_failed = True
+                full_response = (
+                    "The answer could not be generated — the language model is "
+                    "unavailable right now. Please try again in a moment."
+                )
+                stream_box.markdown(full_response)
 
-            result = vog_core.finalize_normal_response(state, full_response)
-            render_chart(result["chart"])
-            render_downloads(result["downloads"], key_prefix="qa")
+            if llm_failed:
+                # Don't build a PowerPoint deck out of an error message, and
+                # don't spend a second model call on follow-up suggestions
+                # when the model just failed.
+                st.session_state.chat_history.append(
+                    {"role": "assistant", "content": full_response}
+                )
+            else:
+                result = vog_core.finalize_normal_response(state, full_response)
+                render_chart(result["chart"])
+                render_downloads(result["downloads"], key_prefix="qa")
 
-        st.session_state.chat_history.append({"role": "assistant", "content": result["final_reply"]})
+                st.session_state.prior_context = {
+                    **state.get("context", {}), "last_reply": full_response
+                }
+                st.session_state.followups = vog_core.generate_followup_suggestions(
+                    state["query_intent"], state.get("subject_label"),
+                    state["timeframe_label"], full_response, GROQ_API_KEY,
+                )
+                st.session_state.chat_history.append(
+                    {"role": "assistant", "content": header + full_response, "badge_html": badge}
+                )
+
+# Clickable follow-ups for the turn just rendered.
+if st.session_state.followups:
+    st.caption("Ask next:")
+    for i, suggestion in enumerate(st.session_state.followups):
+        if st.button(suggestion, key=f"followup_{i}", use_container_width=True):
+            st.session_state.pending_query = suggestion
+            st.rerun()
