@@ -64,11 +64,27 @@ if st.session_state.authenticated:
     uploaded_file = st.file_uploader("Upload Master Performance Log (.xlsx)", type=["xlsx"])
 
     if uploaded_file and PINECONE_API_KEY:
+        purge_first = st.checkbox(
+            "Replace all existing data (purge first)",
+            help=(
+                "Records already in the index keep the tags they were written with. "
+                "After a change to how products, crops or categories are detected, a "
+                "purge is required for the corrections to take effect — re-ingesting "
+                "alone leaves the old records in place. This cannot be undone."
+            ),
+        )
         if st.button("Process Sheets & Map Matrix"):
             with st.spinner("Executing server-side matrix mapping..."):
                 try:
-                    result = vog_core.run_ingestion(uploaded_file.read(), PINECONE_API_KEY)
+                    result = vog_core.run_ingestion(
+                        uploaded_file.read(), PINECONE_API_KEY, purge_first=purge_first
+                    )
                     st.success(f"🎉 Pipeline complete! Ingested {result['total_records']} records.")
+                    # Surface what the parser could not use. These used to be
+                    # silent skips, so a workbook could half-ingest while the
+                    # UI still reported success.
+                    for item in result.get("skipped", []):
+                        st.warning(f"Skipped — {item['sheet']} ({item['reason']}): {item['detail']}")
                 except ValueError as e:
                     st.warning(str(e))
                 except Exception as e:
@@ -174,7 +190,10 @@ if user_query and user_query.strip():
 
     kind = state["kind"]
 
-    if kind in ("blocked", "no_key", "no_data"):
+    # "capability" and "meta_feedback" are reply-only kinds like the rest of
+    # this branch — they carry no badge/header/system_prompt, so letting them
+    # fall through to the "normal" path below raises a KeyError.
+    if kind in ("blocked", "no_key", "no_data", "capability", "meta_feedback"):
         reply = state["reply"]
         with st.chat_message("assistant"):
             st.markdown(reply, unsafe_allow_html=True)
