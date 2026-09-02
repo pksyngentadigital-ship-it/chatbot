@@ -3,7 +3,7 @@ Regression tests for query-parsing/detection logic. Several of these encode
 real bugs that were caught during live QA and fixed once — they exist to
 make sure those exact failures can never silently come back.
 """
-import vog_core as vc
+import legacy_api as vc
 
 
 # ── detect_product_known / detect_crop ──

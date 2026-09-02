@@ -2,7 +2,7 @@
 Deterministic counting must always be exact Python arithmetic over metadata
 tags — never left to the LLM. These tests pin down that contract.
 """
-import vog_core as vc
+import legacy_api as vc
 
 
 def test_rank_by_field_counts_comma_separated_tags():

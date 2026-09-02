@@ -6,7 +6,7 @@ observable behavior a user actually sees, not just internal helpers.
 import json
 
 from conftest import make_record, raising_groq_factory
-import vog_core as vc
+import legacy_api as vc
 
 
 def test_off_topic_query_is_blocked(fake_pinecone_factory):
@@ -54,13 +54,19 @@ def test_complaint_intent_filters_out_positive_bullets(fake_pinecone_factory):
 
 def test_sales_query_scopes_to_product_query_category(fake_pinecone_factory):
     fake_pinecone_factory([
-        make_record("January", "2026", "neutral", "Product Queries", "Grower asked about pricing for Axial."),
-        make_record("January", "2026", "neutral", "Others", "Unrelated general note."),
+        make_record("January", "2026", "neutral", "Product Queries",
+                    "Grower asked about pricing for Axial.", products="Axial"),
+        make_record("January", "2026", "neutral", "Others",
+                    "Unrelated note about Isabion.", products="Isabion"),
     ])
     state = vc.process_chat_query("which products receive the highest price inquiries?", "fake-key")
     # This phrasing has an explicit ranking subject ("which products") +
     # rank word ("highest") -> deterministic ranking path, not "normal".
     assert state["kind"] == "ranking"
+    # ...and only the Product Queries record is in scope, so the one filed
+    # under Others must not be counted.
+    assert "Axial" in state["reply"]
+    assert "Isabion" not in state["reply"]
 
 
 def test_ranking_query_counts_exactly(fake_pinecone_factory):

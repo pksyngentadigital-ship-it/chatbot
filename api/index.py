@@ -24,7 +24,7 @@ from fastapi.responses import JSONResponse, Response, StreamingResponse
 
 from vog import compose, llm, retrieval
 from vog.catalog import SUGGESTED_PROMPTS_QUICK
-from vog.plan import build_plan
+from vog.plan import MODE_REPLY, build_plan
 
 MAX_QUERY_CHARS = 500
 MAX_CONTEXT_CHARS = 4000
@@ -57,10 +57,18 @@ def _context(raw: str | None) -> dict:
 def _prepare(q: str, ctx: str | None):
     """Plan -> evidence -> answer. Shared by /chat and /export so a download
     is built from exactly the same data as the answer above it."""
+    # Planned before connecting: a capability question or an off-topic one
+    # is answered without retrieval, and shouldn't fail because the index is
+    # unreachable or ask the user to wait for a round trip it never needs.
+    prior = _context(ctx)
+    plan = build_plan(q, prior_context=prior)
+    if plan.mode == MODE_REPLY:
+        return plan, retrieval.Evidence(), compose.compose(plan, retrieval.Evidence())
+
     if not PINECONE_API_KEY:
         raise HTTPException(503, "Search is not configured (PINECONE_API_KEY is unset).")
     pc, index = retrieval.connect(PINECONE_API_KEY)
-    latest, prior = retrieval.dataset_extent(index), _context(ctx)
+    latest = retrieval.dataset_extent(index)
     plan = build_plan(q, latest_month_year=latest, prior_context=prior)
 
     # Only when the regexes found nothing to go on is a classification round

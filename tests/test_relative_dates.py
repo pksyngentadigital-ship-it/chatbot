@@ -4,7 +4,7 @@ period" copy fix (Phase 2) — the correctness issues identified during the
 live QA pass.
 """
 from conftest import FakeIndex, make_record
-import vog_core as vc
+import legacy_api as vc
 
 
 # ── month index arithmetic ──

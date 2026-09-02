@@ -8,7 +8,8 @@ match set — so a month with 60 negative records exported "Negative: 12"
 into a PowerPoint.
 """
 from conftest import make_record
-import vog_core as vc
+import legacy_api as vc
+from vog import retrieval
 
 
 # ── Truthful counts ──
@@ -198,7 +199,7 @@ def test_stats_record_is_excluded_from_aggregation():
 
 def test_ranking_says_lower_bound_when_the_fetch_was_capped(monkeypatch, fake_pinecone_factory):
     # Shrink the page rather than fabricating 10k records.
-    monkeypatch.setattr(vc, "AGGREGATION_PAGE_SIZE", 20)
+    monkeypatch.setattr(retrieval, "AGGREGATION_TOP_K", 20)
     records = [
         make_record("January", "2026", "negative", "Complaint/Negative Feedback", f"x{i}", crop="Wheat")
         for i in range(50)

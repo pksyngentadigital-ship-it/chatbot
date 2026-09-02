@@ -84,7 +84,11 @@ class QueryPlan:
         """True when regex detection found nothing to go on, so a model
         classification is worth a round trip. Deliberately narrow: the
         assist only fills a vacuum, it never overrides a real detection."""
-        if self.mode != MODE_ANSWER or self.intent_explicit:
+        # sales_scoped questions are already routed to Product Queries by
+        # SALES_KEYWORDS. Asking the model anyway is how a pricing question
+        # got re-labelled "Suggestions": the fallback guessed an intent and
+        # silently overrode a correct route.
+        if self.mode != MODE_ANSWER or self.intent_explicit or self.sales_scoped:
             return False
         seg = self.segments[0] if self.segments else None
         return not (seg and (seg.product or seg.crop))

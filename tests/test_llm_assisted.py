@@ -11,7 +11,7 @@ Herbicide") before it ever reached a user.
 import json
 
 from conftest import raising_groq_factory
-import vog_core as vc
+import legacy_api as vc
 
 
 # ── generate_followup_suggestions ──

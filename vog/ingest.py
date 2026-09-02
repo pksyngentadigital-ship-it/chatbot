@@ -14,9 +14,10 @@ import re
 from io import BytesIO
 
 from vog import parsing as P
+from vog import retrieval
 from vog.catalog import (
     EMBEDDING_DIMENSION, EMPTY_VALUES, INDEX_STATS_ID, MAX_VALUE_CHARS,
-    MONTH_ORDER, NEGATIVE_CATEGORIES, PINECONE_INDEX_NAME, POSITIVE_CATEGORIES,
+    MONTH_ORDER, NEGATIVE_CATEGORIES, POSITIVE_CATEGORIES,
 )
 
 EMBED_BATCH = 96
@@ -255,7 +256,6 @@ def run_ingestion(file_bytes: bytes, pinecone_api_key: str,
     old metadata — re-ingesting alone does not repair them.
     """
     import openpyxl
-    from pinecone import Pinecone
 
     wb = openpyxl.load_workbook(BytesIO(file_bytes), data_only=True, read_only=True)
     sheet_names = list(wb.sheetnames)
@@ -309,8 +309,7 @@ def run_ingestion(file_bytes: bytes, pinecone_api_key: str,
         raise ValueError("No records found in the uploaded workbook."
                          + (f" Skipped: {skipped}" if skipped else ""))
 
-    pc = Pinecone(api_key=pinecone_api_key)
-    index = pc.Index(PINECONE_INDEX_NAME)
+    pc, index = retrieval.connect(pinecone_api_key)
 
     if purge_first:
         try:

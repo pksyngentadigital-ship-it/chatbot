@@ -13,7 +13,7 @@ reply is empty, an error, or too slow. Run it on a schedule (GitHub
 Actions cron, Render cron job, or any external uptime checker that can run
 a command) and alert on a non-zero exit.
 
-    python scripts/heartbeat.py --url https://voice-of-grower.onrender.com
+    python scripts/heartbeat.py --url https://<your-project>.vercel.app
 
 Exit codes:
     0  healthy
@@ -34,7 +34,7 @@ DEFAULT_TIMEOUT = 90
 
 
 def check(base_url: str, query: str, timeout: int) -> tuple[bool, str]:
-    url = f"{base_url.rstrip('/')}/chat?q={urllib.parse.quote(query)}"
+    url = f"{base_url.rstrip('/')}/api/chat?q={urllib.parse.quote(query)}"
     started = time.monotonic()
 
     try:

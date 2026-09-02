@@ -8,7 +8,7 @@ So "Compare customer sentiment for Tilt and Isabion", which ships as one
 of the app's own suggested prompts, silently answered about Isabion alone.
 """
 from conftest import make_record
-import vog_core as vc
+import legacy_api as vc
 
 
 # ── Multi-subject detection ──

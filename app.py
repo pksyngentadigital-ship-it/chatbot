@@ -15,7 +15,7 @@ from dotenv import load_dotenv
 from vog import compose, llm, retrieval
 from vog.catalog import SUGGESTED_PROMPTS_QUICK
 from vog.ingest import run_ingestion
-from vog.plan import build_plan
+from vog.plan import MODE_REPLY, build_plan
 
 APP_BUILD = "2026-09-02-v14 (vog package; chat primary on Vercel)"
 
@@ -131,8 +131,14 @@ def render_downloads(answer, summary_text: str, key_prefix: str):
 
 def answer_for(query: str):
     """Question -> (plan, evidence, answer). Same three calls the API makes."""
+    # A capability or off-topic question is answered without retrieval.
+    prior = st.session_state.prior_context
+    plan = build_plan(query, prior_context=prior)
+    if plan.mode == MODE_REPLY:
+        return plan, retrieval.Evidence(), compose.compose(plan, retrieval.Evidence())
+
     pc, index = retrieval.connect(PINECONE_API_KEY)
-    latest, prior = retrieval.dataset_extent(index), st.session_state.prior_context
+    latest = retrieval.dataset_extent(index)
     plan = build_plan(query, latest_month_year=latest, prior_context=prior)
 
     # Only worth a classification round trip when the regexes found nothing.

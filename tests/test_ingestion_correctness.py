@@ -12,7 +12,8 @@ from io import BytesIO
 import pandas as pd
 import pytest
 
-import vog_core as vc
+import legacy_api as vc
+from vog import retrieval
 
 
 class _RecordingIndex:
@@ -56,7 +57,7 @@ def ingest(monkeypatch):
             for name, df in sheets.items():
                 df.to_excel(w, sheet_name=name, index=False, header=kwargs.pop("_header", True))
         index = _RecordingIndex()
-        monkeypatch.setattr(vc, "Pinecone", lambda api_key=None: _FakePC(index))
+        monkeypatch.setattr(retrieval, "connect", lambda api_key: (_FakePC(index), index))
         result = vc.run_ingestion(buf.getvalue(), "fake-key", **kwargs)
         return result, index
     return _run

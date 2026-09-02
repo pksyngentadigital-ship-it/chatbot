@@ -7,7 +7,8 @@ from io import BytesIO
 import pandas as pd
 import pytest
 
-import vog_core as vc
+import legacy_api as vc
+from vog import retrieval
 
 
 def _build_workbook(sheets: dict) -> bytes:

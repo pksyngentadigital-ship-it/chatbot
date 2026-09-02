@@ -23,7 +23,7 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-import vog_core  # noqa: E402
+from vog.catalog import GROQ_MODEL  # noqa: E402
 
 
 # ── Tool schemas ──
@@ -173,7 +173,7 @@ def evaluate(calls, expected_tool, expected_args, min_calls):
 def run_probe(groq_api_key: str, model: str | None = None) -> dict:
     from groq import Groq
 
-    model = model or vog_core.GROQ_MODEL
+    model = model or GROQ_MODEL
     client = Groq(api_key=groq_api_key)
     results, passed = [], 0
 

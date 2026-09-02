@@ -5,7 +5,7 @@ import pandas as pd
 from io import BytesIO
 from pptx import Presentation
 
-import vog_core as vc
+import legacy_api as vc
 
 
 # ── build_subject_label ──
@@ -144,8 +144,10 @@ def test_build_pptx_report_produces_valid_deck_with_expected_slides():
     assert isinstance(pptx_bytes, bytes)
     assert len(pptx_bytes) > 0
     prs = Presentation(BytesIO(pptx_bytes))
-    # Title, Executive Summary, KPIs, Chart, Table, Insights = 6 slides
-    assert len(prs.slides) == 6
+    # Title, Summary, Key figures, Chart, Table = 5 slides. Insights and
+    # recommendations are part of the summary now rather than a slide of
+    # their own — one fewer slide of the same content.
+    assert len(prs.slides) == 5
 
 
 def test_build_pptx_report_skips_optional_slides_when_no_data():
@@ -154,5 +156,6 @@ def test_build_pptx_report_skips_optional_slides_when_no_data():
         exec_summary_lines=[], kpis={}, chart_title="", chart_labels=[], chart_values=[],
     )
     prs = Presentation(BytesIO(pptx_bytes))
-    # No chart/table/insights data -> only Title, Exec Summary, KPIs
-    assert len(prs.slides) == 3
+    # Nothing optional to show -> Title and Summary only. An empty "Key
+    # figures" slide is noise in a deck someone is about to present.
+    assert len(prs.slides) == 2

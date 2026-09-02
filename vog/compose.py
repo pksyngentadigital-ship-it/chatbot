@@ -182,13 +182,21 @@ def _answer(plan: QueryPlan, ev: Evidence) -> Answer:
         for label, bucket in (("Positive", s.positive), ("Negative", s.negative), ("Other", s.neutral)):
             rows += [{"Segment": s.label, "Sentiment": label, "Feedback": b} for b in bucket]
 
-    # Tell the model plainly when it is seeing a sample. Saying "N total"
-    # for a truncated set invited it to describe 12 of 240 as the whole
-    # picture.
-    sampled = ev.total > ev.shown
-    scope_note = (f"{ev.shown} of {ev.total} matching points (a sample — do not "
-                  f"describe these as the complete set)"
-                  if sampled else f"{ev.shown} distinct data points (all of them)")
+    # Be explicit with the model about sampling. Saying "N total" when N
+    # was a truncated slice invited it to describe a 12-record sample as
+    # the whole picture. The wording is deliberately emphatic: it is the
+    # only thing standing between a partial fetch and a confident false
+    # total.
+    if ev.total > ev.shown:
+        volume_note = (
+            f"showing {ev.shown} of {ev.total} matching data points "
+            f"(a sample, NOT the complete set). Base every statement only on "
+            f"the points below, and do not state or imply totals, counts or "
+            f"proportions for the full dataset"
+        )
+    else:
+        volume_note = (f"{ev.shown} distinct data point"
+                       f"{'s' if ev.shown != 1 else ''} total — do not exceed this number")
 
     system_prompt = P.build_system_prompt(
         plan.intent, timeframe, plan.list_format,
@@ -200,9 +208,10 @@ def _answer(plan: QueryPlan, ev: Evidence) -> Answer:
         avoid_repeat_text=plan.avoid_repeat,
         comparison_axis=plan.comparison_axis or "time",
     )
-    user_prompt = (f"Timeframe: {timeframe}\n\n"
-                   f"Data Context ({scope_note}):\n" + "\n\n".join(blocks) +
-                   f"\n\nUser Query: {plan.query}")
+    user_prompt = ("Timeframe: " + timeframe + '\n' * 2 +
+                   "Data Context — " + volume_note + ":" + '\n' +
+                   ('\n' * 2).join(blocks) + '\n' * 2 +
+                   "User Query: " + plan.query)
 
     return Answer(
         kind="prompt", badge=badge, header=header,
@@ -213,16 +222,23 @@ def _answer(plan: QueryPlan, ev: Evidence) -> Answer:
         export_rows=rows,
         export_meta={"title": subject or f"{plan.intent.title()} Analysis",
                      "subtitle": timeframe,
-                     # True totals, not the truncated ones. A month with 60
-                     # negatives exported "Negative: 12" before.
-                     "kpis": {"Matching points": ev.total,
-                              "Positive": sum(s.totals["positive"] for s in ev.segments),
-                              "Negative": sum(s.totals["negative"] for s in ev.segments),
-                              "Other": sum(s.totals["neutral"] for s in ev.segments)},
+                     "kpis": _kpis(ev),
                      "table_headers": ["Segment", "Sentiment", "Feedback"],
                      "table_rows": [(r["Segment"], r["Sentiment"], r["Feedback"]) for r in rows]},
         context=_context_of(plan),
     )
+
+
+def _kpis(ev: Evidence) -> dict:
+    """True totals, not the truncated ones — a month with 60 negatives
+    exported "Negative: 12" before."""
+    kpis = {"Total matching records": ev.total,
+            "Positive": sum(s.totals["positive"] for s in ev.segments),
+            "Negative": sum(s.totals["negative"] for s in ev.segments),
+            "Other": sum(s.totals["neutral"] for s in ev.segments)}
+    if ev.total > ev.shown:
+        kpis["Shown to the model"] = f"{ev.shown} (sample)"
+    return kpis
 
 
 def _sentiment_chart(ev: Evidence, plan: QueryPlan) -> dict:
