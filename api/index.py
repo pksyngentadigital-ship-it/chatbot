@@ -60,8 +60,17 @@ def _prepare(q: str, ctx: str | None):
     if not PINECONE_API_KEY:
         raise HTTPException(503, "Search is not configured (PINECONE_API_KEY is unset).")
     pc, index = retrieval.connect(PINECONE_API_KEY)
-    plan = build_plan(q, latest_month_year=retrieval.dataset_extent(index),
-                      prior_context=_context(ctx))
+    latest, prior = retrieval.dataset_extent(index), _context(ctx)
+    plan = build_plan(q, latest_month_year=latest, prior_context=prior)
+
+    # Only when the regexes found nothing to go on is a classification round
+    # trip worth its latency — and what comes back is validated against the
+    # real catalogs before it can influence anything.
+    if plan.needs_assist and GROQ_API_KEY:
+        assist = llm.classify_query(q, GROQ_API_KEY)
+        if assist:
+            plan = build_plan(q, latest_month_year=latest, prior_context=prior, assist=assist)
+
     evidence = retrieval.gather(plan, index, pc)
     return plan, evidence, compose.compose(plan, evidence)
 

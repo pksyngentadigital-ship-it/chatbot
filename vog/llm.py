@@ -81,3 +81,59 @@ def embed(texts: list[str], pc, input_type: str = "query") -> list[list[float]]:
         parameters={"input_type": input_type, "dimension": EMBEDDING_DIMENSION},
     )
     return [item.values for item in resp]
+
+
+_CLASSIFY_PROMPT = (
+    "You are a query classifier for an agricultural grower-feedback chatbot. "
+    "Classify the user's question.\n\n"
+    'Return ONLY a JSON object: {"product": "<name or null>", "crop": "<name or null>", '
+    '"intent": "<one of: complaint, positive, suggestion, sentiment, topics>"}\n\n'
+    "Intent definitions — pick by what the user actually wants, not by "
+    "which words appear:\n"
+    "- complaint: problems, issues, dissatisfaction, things going wrong, "
+    "root causes, why something failed.\n"
+    "- positive: praise, what is working well, satisfaction, successes.\n"
+    "- suggestion: what people want changed, asked for, or improved; "
+    "requests, expectations, ideas.\n"
+    "- topics: what is being discussed most; themes, subjects, "
+    "'what are people talking about' — NOT whether it is good or bad.\n"
+    "- sentiment: a general read of both good and bad together; use this "
+    "only when none of the above fits better.\n\n"
+    "Examples:\n"
+    'Q: "why are growers unhappy with delivery" -> {"product": null, "crop": null, "intent": "complaint"}\n'
+    'Q: "what is working well this season" -> {"product": null, "crop": null, "intent": "positive"}\n'
+    'Q: "what do growers wish we did differently" -> {"product": null, "crop": null, "intent": "suggestion"}\n'
+    'Q: "what is dominating the conversation" -> {"product": null, "crop": null, "intent": "topics"}\n'
+    'Q: "give me a read on how wheat growers feel" -> {"product": null, "crop": "wheat", "intent": "sentiment"}\n\n'
+    "If you are not confident about product or crop, use null. Never invent a "
+    "product or crop name — only name one that appears in the user's own question."
+)
+
+
+def classify_query(user_query: str, api_key: str) -> dict | None:
+    """Propose product / crop / intent for a question the regexes couldn't read.
+
+    The guardrail is the validation, not the prompt: every proposed value is
+    checked against the real catalogs and the fixed intent enum, so the model
+    can only ever hit a name that already exists — it cannot introduce one.
+    That check is what caught an invented product name during testing before
+    it reached anybody. Returns None when nothing survives validation.
+    """
+    parsed = complete_json(_CLASSIFY_PROMPT, user_query, api_key, max_tokens=200)
+    if not isinstance(parsed, dict):
+        return None
+
+    from vog.catalog import CROP_LIST, PRODUCT_LIST
+    from vog.plan import INTENTS
+
+    result = {"product": None, "crop": None, "intent": None}
+    product = parsed.get("product")
+    if isinstance(product, str) and product.strip().lower() in PRODUCT_LIST:
+        result["product"] = product.strip().lower()
+    crop = parsed.get("crop")
+    if isinstance(crop, str) and crop.strip().lower() in CROP_LIST:
+        result["crop"] = crop.strip().lower()
+    if parsed.get("intent") in INTENTS:
+        result["intent"] = parsed["intent"]
+
+    return result if any(result.values()) else None

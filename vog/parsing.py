@@ -523,6 +523,28 @@ def compute_monthly_trend(matches):
     ordered_keys = sorted(counts.keys(), key=lambda k: (int(k[0]), MONTH_ORDER[k[1]]))
     return [(f"{month} {year}", counts[(year, month)]) for year, month in ordered_keys]
 
+def densify_monthly_counts(monthly_counts):
+    """Insert zero-count entries for months with no records.
+
+    compute_monthly_trend only emits months that have data, so walking the
+    result by index treats non-adjacent months as consecutive — a series of
+    [Nov 2025, Feb 2026] produced a "+300% month-over-month" label across a
+    three-month gap.
+    """
+    if not monthly_counts:
+        return []
+    parsed = []
+    for label, count in monthly_counts:
+        month, year = label.rsplit(" ", 1)
+        parsed.append((_month_idx(month, year), count))
+    out = []
+    for idx in range(parsed[0][0], parsed[-1][0] + 1):
+        month, year = _idx_to_month_year(idx)
+        match = next((c for i, c in parsed if i == idx), 0)
+        out.append((f"{month} {year}", match))
+    return out
+
+
 def compute_growth_series(monthly_counts):
     """ Given [(label, count), ...] in chronological order, return a parallel list of month-over-month growth percentages (None for the first period, which has no prior month to compare against). """
     growth = [None]

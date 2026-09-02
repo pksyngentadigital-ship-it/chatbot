@@ -77,6 +77,17 @@ class QueryPlan:
     products_only: bool = False
     avoid_repeat: str | None = None
     canned_reply: str | None = None
+    blocked: bool = False
+
+    @property
+    def needs_assist(self) -> bool:
+        """True when regex detection found nothing to go on, so a model
+        classification is worth a round trip. Deliberately narrow: the
+        assist only fills a vacuum, it never overrides a real detection."""
+        if self.mode != MODE_ANSWER or self.intent_explicit:
+            return False
+        seg = self.segments[0] if self.segments else None
+        return not (seg and (seg.product or seg.crop))
 
     @property
     def is_comparison(self) -> bool:
@@ -126,6 +137,7 @@ def build_plan(
     *,
     latest_month_year: tuple[str, str] | None = None,
     prior_context: dict | None = None,
+    assist: dict | None = None,
 ) -> QueryPlan:
     """Pure: everything needing the index is passed in.
 
@@ -143,6 +155,18 @@ def build_plan(
         return plan
     if P.detect_capability_question(q):
         plan.mode, plan.canned_reply = MODE_REPLY, P.CAPABILITY_REPLY
+        return plan
+
+    # Topic guardrail. A continuation phrase ("what about last month?") has
+    # no domain word of its own but is plainly continuing an in-scope turn,
+    # so it passes exactly when there is prior context for it to continue.
+    if not P.is_query_in_scope(user_query) and not (
+            prior_context and P.detect_followup_reference(q)):
+        plan.mode, plan.blocked = MODE_REPLY, True
+        plan.canned_reply = (
+            "I cannot generate this response. I am strictly locked to analyzed "
+            "dataset metrics and cannot find relevant information for this query."
+        )
         return plan
 
     # ── Intent ──
@@ -168,6 +192,18 @@ def build_plan(
     crop = crops[0] if crops else None
     if product and crop and product.lower() == crop.lower():
         product, products = None, []
+
+    # A model-proposed product/crop/intent for a question the regexes could
+    # not read. Every value was validated against the real catalogs before
+    # it got here, so the model can only ever hit an existing name, never
+    # introduce one. It fills gaps and never overrides a real detection.
+    if assist and not (product or crop) and not plan.intent_explicit:
+        product = assist.get("product") or None
+        crop = assist.get("crop") or None
+        if assist.get("intent"):
+            plan.intent, plan.intent_explicit = assist["intent"], True
+            if plan.intent == "suggestion":
+                plan.category_filter = SUGGESTION_CATEGORY
 
     # Follow-up inheritance: fills gaps only, never overrides, and only on
     # an explicit continuation phrase so an unrelated question is never

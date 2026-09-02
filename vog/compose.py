@@ -101,7 +101,11 @@ def _rank(plan: QueryPlan, ev: Evidence) -> Answer:
 
 
 def _trend(plan: QueryPlan, ev: Evidence) -> Answer:
-    monthly = P.compute_monthly_trend(ev.matches)
+    # Densified first: compute_monthly_trend emits only months that have
+    # data, so walking it by index treats non-adjacent months as
+    # consecutive — [Nov 2025, Feb 2026] read as '+300% month-over-month'
+    # across a three-month gap.
+    monthly = P.densify_monthly_counts(P.compute_monthly_trend(ev.matches))
     seg = plan.segments[0] if plan.segments else None
     subject = P.build_subject_label(seg.product if seg else None, seg.crop if seg else None)
     subject_bit = f" for {subject}" if subject else ""
