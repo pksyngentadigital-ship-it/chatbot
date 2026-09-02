@@ -8,7 +8,7 @@ from dataclasses import dataclass, field
 
 from vog import llm
 from vog import parsing as P
-from vog.catalog import EMBEDDING_DIMENSION, PINECONE_INDEX_NAME
+from vog.catalog import EMBEDDING_DIMENSION, INDEX_STATS_ID, PINECONE_INDEX_NAME
 from vog.plan import QueryPlan, Segment
 
 # A zero vector carries no similarity signal, so Pinecone returns an
@@ -24,9 +24,6 @@ AGGREGATION_TOP_K = 10_000
 BULLETS_PER_BUCKET = 12
 BULLETS_PER_BUCKET_BROAD = 40
 BROAD_INTENTS = ("topics",)
-
-_STATS_ID = "__vog_index_stats__"
-
 
 @dataclass
 class SegmentEvidence:
@@ -76,11 +73,11 @@ def dataset_extent(index) -> tuple[str, str] | None:
     top_k=10 version could decide the 'latest year' from ten arbitrary
     records and scope a whole answer to the wrong year."""
     try:
-        got = index.fetch(ids=[_STATS_ID])
+        got = index.fetch(ids=[INDEX_STATS_ID])
         vectors = getattr(got, "vectors", None) or (got or {}).get("vectors", {})
-        meta = (vectors.get(_STATS_ID) or {}).get("metadata") or {}
-        if meta.get("latest_month") and meta.get("latest_year"):
-            return meta["latest_month"], str(meta["latest_year"])
+        meta = (vectors.get(INDEX_STATS_ID) or {}).get("metadata") or {}
+        if meta.get("max_month") and meta.get("max_year"):
+            return meta["max_month"], str(meta["max_year"])
     except Exception:
         pass
 

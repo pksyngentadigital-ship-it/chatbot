@@ -10,6 +10,11 @@ PINECONE_INDEX_NAME = "chatbot"
 
 EMBEDDING_DIMENSION = 384
 
+# A single record holding the dataset's real month/year extents, written at
+# ingestion. Relative dates ("last quarter") anchor to it instead of to
+# today, because the data routinely lags the calendar.
+INDEX_STATS_ID = "vog_index_stats"
+
 # Overridable without a code change so the model can be A/B'd or rolled
 # back from the Render dashboard alone — the Llama retirement earlier
 # required a code edit and a full redeploy to recover from.
