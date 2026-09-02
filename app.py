@@ -263,7 +263,7 @@ if user_query and user_query.strip():
                 render_chart(answer.chart)
                 render_downloads(answer, body, key_prefix="qa")
                 st.session_state.prior_context = {**answer.context, "last_reply": full[:1500]}
-                st.session_state.followups = compose.suggest_followups(plan, full, GROQ_API_KEY)
+                st.session_state.followups = compose.followups(plan, answer, full, GROQ_API_KEY)
                 st.session_state.chat_history.append(
                     {"role": "assistant", "content": full, "badge_html": badge})
 

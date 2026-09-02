@@ -609,7 +609,14 @@ def detect_trend_request(query_lower: str) -> bool:
     trend_phrases = [
         'trend', 'trends', 'trending', 'month over month', 'month-over-month',
         'monthly trend', 'over time', 'growth', 'analytics over time',
-        'performance over', 'monthly totals', 'monthly breakdown'
+        'performance over', 'monthly totals', 'monthly breakdown',
+        # "...by month" / "...per month" / "monthly ..." are the plainest way
+        # to ask for a time series, and were missing: "show overall grower
+        # sentiment by month" — one of the app's own suggested prompts — fell
+        # through to a single-period summary, and the model then said the data
+        # contained no monthly information.
+        'by month', 'per month', 'each month', 'by week', 'per week',
+        'month by month', 'monthly',
     ]
     return any(p in query_lower for p in trend_phrases)
 

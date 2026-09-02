@@ -595,3 +595,44 @@ def test_capability_reply_describes_real_features():
 def test_a_real_data_question_is_not_mistaken_for_a_capability_question():
     assert vc.detect_capability_question("what are the complaints about isabion") is False
     assert vc.detect_capability_question("which crop has the most complaints") is False
+
+
+def test_reply_only_turns_get_curated_followups_not_invented_ones():
+    """Observed live: with no retrieved data to read, the suggester filled
+    the vacuum with products that do not exist ("HydroBoost", a "SoilSense
+    sensor"). Reply-only turns take the curated list instead."""
+    from vog import compose
+    from vog.catalog import SUGGESTED_PROMPTS_QUICK
+    from vog.plan import build_plan
+
+    def _boom(*a, **k):
+        raise AssertionError("the model must not be asked on a reply-only turn")
+
+    plan = build_plan("what can you do for me?")
+    for kind in ("reply", "no_data"):
+        answer = compose.Answer(kind=kind, text="...")
+        got = compose.followups(plan, answer, "...", "fake-key")
+        assert got == list(SUGGESTED_PROMPTS_QUICK[:3])
+        assert all(s in SUGGESTED_PROMPTS_QUICK for s in got)
+
+
+def test_followups_fall_back_to_curated_when_the_model_returns_nothing(monkeypatch):
+    from vog import compose, llm
+    from vog.catalog import SUGGESTED_PROMPTS_QUICK
+    from vog.plan import build_plan
+
+    monkeypatch.setattr(llm, "complete_json", lambda *a, **k: None)
+    answer = compose.Answer(kind="prompt", text="")
+    got = compose.followups(build_plan("what are the complaints?"), answer, "body", "fake-key")
+    assert got == list(SUGGESTED_PROMPTS_QUICK[:3]), "an empty suggestion list leaves dead space in the UI"
+
+
+def test_by_month_phrasing_routes_to_the_trend_path():
+    """One of the app's own suggested prompts. It fell through to a
+    single-period summary, and the model then reported that the data
+    contained no monthly information."""
+    from vog.plan import MODE_TREND, build_plan
+    for q in ("show overall grower sentiment by month",
+              "complaints per month",
+              "monthly breakdown of feedback"):
+        assert build_plan(q).mode == MODE_TREND, q

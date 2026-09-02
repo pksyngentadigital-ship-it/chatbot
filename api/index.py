@@ -182,8 +182,7 @@ def _bullets(evidence) -> list[str]:
 
 
 def _finish(plan, answer, full_text: str):
-    suggestions = (compose.suggest_followups(plan, full_text, GROQ_API_KEY)
-                   if GROQ_API_KEY else [])
+    suggestions = compose.followups(plan, answer, full_text, GROQ_API_KEY)
     yield _sse("final", {
         "reply": full_text,
         "badge": answer.badge,

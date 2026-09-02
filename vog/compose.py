@@ -10,7 +10,7 @@ from dataclasses import dataclass, field
 from vog import exports
 from vog import llm
 from vog import parsing as P
-from vog.catalog import DEFAULT_TIMEFRAME_LABEL
+from vog.catalog import DEFAULT_TIMEFRAME_LABEL, SUGGESTED_PROMPTS_QUICK
 from vog.plan import MODE_RANK, MODE_REPLY, MODE_TREND, QueryPlan
 from vog.retrieval import Evidence
 
@@ -287,9 +287,23 @@ def build_exports(answer: Answer, summary_text: str = "") -> dict:
 # both return empty on any failure — a broken garnish call must never
 # break or delay the answer itself.
 
+def followups(plan: QueryPlan, answer: Answer, answer_text: str,
+              api_key: str, n: int = 3) -> list[str]:
+    """Follow-up chips for the turn that just finished.
+
+    Asking the model only pays when there is real feedback text for it to
+    read. Observed live on a capability reply and a refusal, where there is
+    none: it proposed questions about "HydroBoost" and a "SoilSense sensor",
+    neither of which exists. Those turns get the curated prompts instead —
+    real questions, no round trip.
+    """
+    if not api_key or answer.kind in ("reply", "no_data"):
+        return list(SUGGESTED_PROMPTS_QUICK[:n])
+    return suggest_followups(plan, answer_text, api_key, n=n) or list(SUGGESTED_PROMPTS_QUICK[:n])
+
+
 def suggest_followups(plan: QueryPlan, answer_text: str, api_key: str, n: int = 3) -> list[str]:
-    """Propose follow-up QUESTIONS. Nothing to hallucinate here: these are
-    prompts for the user, not asserted facts."""
+    """Propose follow-up QUESTIONS grounded in the answer just given."""
     subject = plan.subject_label
     parsed = llm.complete_json(
         "Return only a JSON array of short question strings. No markdown, no numbering.",
@@ -298,7 +312,9 @@ def suggest_followups(plan: QueryPlan, answer_text: str, api_key: str, n: int = 
          f"{answer_text[:2000]}\n\n"
          f"Suggest exactly {n} short, genuinely different follow-up questions about this "
          f"grower-feedback dataset — a different crop, product, timeframe or angle, not a "
-         f"rephrasing of the same question."),
+         f"rephrasing of the same question. Name only products and crops that appear in "
+         f"the answer above; never invent one, and prefer a general phrasing over a "
+         f"guessed name."),
         api_key, max_tokens=300,
     )
     if not isinstance(parsed, list):
